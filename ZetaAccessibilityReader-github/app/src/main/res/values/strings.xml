@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Zeta Dialogue Reader</string>
+    <string name="service_description">제타 화면의 내 응답, AI 화자별 대사, 배경 설명을 구분해 누적합니다.</string>
+</resources>

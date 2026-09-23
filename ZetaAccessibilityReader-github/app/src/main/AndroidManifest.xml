@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Android 11 이상에서 제타 실행 아이콘을 찾기 위한 패키지 공개 범위. -->
+    <queries>
+        <package android:name="com.scatterlab.messenger" />
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:label="Zeta Dialogue Reader"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ZetaAccessibilityService"
+            android:exported="true"
+            android:label="제타 대화 읽기"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/zeta_accessibility_service" />
+        </service>
+    </application>
+
+</manifest>
