@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jev-pippa-explorer"
+version = "0.1.0"
+description = "Exploratory expanding-window analysis of PIPPA conversations with Jev"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+jev-pippa = "jev_pippa.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
