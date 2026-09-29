@@ -1,0 +1,26 @@
+{
+  "context_shift": {
+    "type": "noul",
+    "instructions": "Does `current_turn` mark a meaningful transition from the preceding turns in `conversation_prefix` into a new topic, event, scene, or conversational phase? Judge the boundary at the current turn, not whether a shift happened somewhere earlier.",
+    "criteria": {
+      "true": "The current turn begins or clearly establishes a meaningfully different topic, event, scene, or phase.",
+      "false": "The current turn continues, elaborates, or locally responds within the same topic, event, scene, or phase."
+    }
+  },
+  "natural_breakpoint": {
+    "type": "noul",
+    "instructions": "At the end of `current_turn`, could the human user naturally end this conversation now without interrupting an unresolved exchange, active question, or emotionally or narratively immediate beat? Judge local stopping-point naturalness, not whether the user should stop.",
+    "criteria": {
+      "true": "The interaction has a locally complete, settled, or pause-friendly boundary.",
+      "false": "Ending now would noticeably interrupt an active exchange, question, action, conflict, or immediate emotional or narrative beat."
+    }
+  },
+  "engagement_drop": {
+    "type": "noul",
+    "instructions": "Compared with the human user's earlier messages in `conversation_prefix`, does `latest_human_turn` show lower conversational engagement? Consider reduced elaboration, initiative, responsiveness, emotional investment, or willingness to continue in context. Do not treat brevity alone as disengagement. If there is not enough earlier human evidence for a comparison, favor false.",
+    "criteria": {
+      "true": "The latest human contribution shows a meaningful decrease in engagement relative to that user's earlier behavior in this conversation.",
+      "false": "Engagement is stable or higher, the difference is not meaningful, or there is insufficient evidence."
+    }
+  }
+}
