@@ -2,6 +2,7 @@ package com.example.zetareader
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Rect
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -38,6 +39,7 @@ class ZetaAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        connectedInstance = this
         lastEventUptimeMs = SystemClock.uptimeMillis()
         overlay = LiveDialogueOverlay(this)
         scheduleCapture()
@@ -65,6 +67,7 @@ class ZetaAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        if (connectedInstance === this) connectedInstance = null
         handler.removeCallbacks(captureRunnable)
         captureScheduled = false
         overlay?.hide()
@@ -168,6 +171,65 @@ class ZetaAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** 디버그 데이터셋 작업에서 현재 제타 입력칸에 문장을 넣고 전송한다. */
+    private fun enqueueDatasetMessage(text: String): Boolean {
+        if (text.isBlank()) return false
+        val root = rootInActiveWindow ?: return false
+        val accepted = try {
+            if (root.packageName?.toString() != ZETA_PACKAGE) return false
+            performFirst(root, predicate = { node ->
+                node.className?.toString() == "android.widget.EditText" && node.isEditable
+            }) { input ->
+                input.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_TEXT,
+                    Bundle().apply {
+                        putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            text,
+                        )
+                    },
+                )
+            }
+        } finally {
+            root.recycle()
+        }
+        if (!accepted) return false
+
+        handler.postDelayed({ clickSendButton() }, DATASET_SEND_DELAY_MS)
+        return true
+    }
+
+    private fun clickSendButton() {
+        val root = rootInActiveWindow ?: return
+        try {
+            if (root.packageName?.toString() != ZETA_PACKAGE) return
+            performFirst(root, predicate = { node ->
+                node.className?.toString() == "android.widget.Button" &&
+                    node.contentDescription?.toString() == "Send" &&
+                    node.isEnabled
+            }) { send -> send.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun performFirst(
+        node: AccessibilityNodeInfo,
+        predicate: (AccessibilityNodeInfo) -> Boolean,
+        action: (AccessibilityNodeInfo) -> Boolean,
+    ): Boolean {
+        if (predicate(node)) return action(node)
+        for (index in 0 until node.childCount) {
+            val child = node.getChild(index) ?: continue
+            try {
+                if (performFirst(child, predicate, action)) return true
+            } finally {
+                child.recycle()
+            }
+        }
+        return false
+    }
+
     private fun snapshot(node: AccessibilityNodeInfo, counter: IntArray): UiNode {
         counter[0] += 1
         val rect = Rect()
@@ -220,6 +282,12 @@ class ZetaAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        @Volatile
+        private var connectedInstance: ZetaAccessibilityService? = null
+
+        internal fun sendDatasetMessage(text: String): Boolean =
+            connectedInstance?.enqueueDatasetMessage(text) == true
+
         private const val TAG = "ZetaReader"
         private const val ZETA_PACKAGE = "com.scatterlab.messenger"
         private const val CHAT_ROOM_VIEW_ID = "chat-room-screen"
@@ -228,5 +296,6 @@ class ZetaAccessibilityService : AccessibilityService() {
         private const val LIVE_POLL_INTERVAL_MS = 500L
         private const val RECENT_EVENT_MAX_AGE_MS = 1_500L
         private const val NON_DIALOGUE_CONFIRMATIONS = 2
+        private const val DATASET_SEND_DELAY_MS = 250L
     }
 }

@@ -33,7 +33,7 @@ object JevEvaluationCoordinator {
     private const val JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
     private const val JEV_MODEL = "jev-latest"
     private const val QUESTIONS_ASSET = "jev_questions.json"
-    private const val DEBOUNCE_MS = 2_000L
+    private const val DEBOUNCE_MS = 5_000L
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 120_000
     private const val MAX_ERROR_CHARS = 500
