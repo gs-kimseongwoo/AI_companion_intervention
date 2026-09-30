@@ -220,6 +220,22 @@ object CaptureStore {
         return true
     }
 
+    /** Reader 화면에서 실패한 현재 JEV 범위를 새 메시지 없이 다시 요청한다. */
+    @Synchronized
+    fun retryJev(context: Context): Boolean {
+        val conversation = activeConversation?.conversation
+            ?: ensureRegistry(context)
+                .allStates()
+                .maxByOrNull { it.lastAccessedAtEpochMs }
+            ?: return false
+        val snapshot = conversation.jevStartMessageId
+            ?.let(conversation::evaluationSnapshot)
+            ?.takeIf { it.isReadyForEvaluation }
+            ?: return false
+        JevEvaluationCoordinator.retry(context, snapshot)
+        return true
+    }
+
     @Synchronized
     fun readLastFormatted(context: Context): String? {
         val active = activeConversation
@@ -232,6 +248,7 @@ object CaptureStore {
             ConversationStatePersistence.save(conversationsDirectory(context), conversation)
             JevEvaluationCoordinator.resetToBaseline(context, conversation.conversationId)
         }
+        latestSnapshot = conversation.snapshot()
         return formatConversation(conversation, active?.lastCapture).also {
             latestFormatted = it
         }

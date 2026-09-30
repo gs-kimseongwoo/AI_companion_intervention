@@ -2,6 +2,7 @@ package com.example.zetareader
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -11,8 +12,10 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -21,6 +24,7 @@ import android.widget.Toast
 /** 접근성 권한 상태, 측정 시간, 분류된 대화를 보여주는 간단한 확인 화면. */
 class MainActivity : Activity() {
     private lateinit var serviceStatus: TextView
+    private lateinit var jevCredentialStatus: TextView
     private lateinit var timingStatus: TextView
     private lateinit var conversation: TextView
 
@@ -52,6 +56,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshServiceStatus()
+        refreshJevCredentialStatus()
         refreshCapture()
     }
 
@@ -93,13 +98,30 @@ class MainActivity : Activity() {
             }
         }, matchWidthWrapHeight())
 
+        jevCredentialStatus = TextView(this).apply {
+            textSize = 15f
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setBackgroundColor(Color.WHITE)
+        }
+        outer.addView(jevCredentialStatus, matchWidthWrapHeight())
+
         outer.addView(Button(this).apply {
-            text = "2. 제타 열기"
+            text = "2. TypeSafe API 키 저장/교체"
+            setOnClickListener { showApiKeyDialog() }
+        }, matchWidthWrapHeight())
+
+        outer.addView(Button(this).apply {
+            text = "3. 현재 JEV 범위 다시 분석"
+            setOnClickListener { retryJev() }
+        }, matchWidthWrapHeight())
+
+        outer.addView(Button(this).apply {
+            text = "4. 제타 열기"
             setOnClickListener { openZeta() }
         }, matchWidthWrapHeight())
 
         outer.addView(Button(this).apply {
-            text = "3. 최근 결과 새로고침"
+            text = "5. 최근 결과 새로고침"
             setOnClickListener { refreshCapture() }
         }, matchWidthWrapHeight())
 
@@ -137,12 +159,25 @@ class MainActivity : Activity() {
         serviceStatus.setTextColor(if (enabled) Color.rgb(20, 120, 60) else Color.rgb(180, 60, 40))
     }
 
+    private fun refreshJevCredentialStatus() {
+        val configured = JevApiKeyStore.isConfigured(this)
+        jevCredentialStatus.text = if (configured) {
+            "TypeSafe API 키: 이 휴대폰에 보안 저장됨\nJEV 직접 연결 준비됨 · 컴퓨터 연결 불필요"
+        } else {
+            "TypeSafe API 키: 미설정\n아래 버튼에서 키를 저장해야 JEV를 사용할 수 있습니다."
+        }
+        jevCredentialStatus.setTextColor(
+            if (configured) Color.rgb(20, 120, 60) else Color.rgb(180, 60, 40),
+        )
+    }
+
     private fun refreshCapture() {
+        val formattedConversation = CaptureStore.readLastFormatted(this)
         val latest = CaptureStore.latest
         val snapshot = CaptureStore.latestSnapshot
         val jev = JevEvaluationCoordinator.latest
-        if (latest != null) {
-            val conversationState = snapshot?.let {
+        if (snapshot != null) {
+            val conversationState = snapshot.let {
                 val room = it.conversationId
                     .removePrefix("room:")
                     .let { value -> if (value.length > 12) value.take(12) else value }
@@ -157,19 +192,23 @@ class MainActivity : Activity() {
                 JevEvaluationPhase.SUCCEEDED -> jev.result?.let { result ->
                     "JEV 관찰값 · 자연 종료 ${formatScore(result.naturalBreakpoint)} · " +
                         "맥락 전환 ${formatScore(result.contextShift)} · " +
-                        "참여 저하 ${formatScore(result.engagementDrop)}"
+                        "참여 저하 ${formatScore(result.engagementDrop)}\n" +
+                        "JEV 직접 응답 · ${result.model} · " +
+                        "${"%.0f".format(result.latencyMs)} ms · " +
+                        "토큰 ${result.inputTokens ?: "?"}/${result.outputTokens ?: "?"}"
                 } ?: "JEV: 결과 없음"
                 JevEvaluationPhase.FAILED -> "JEV 오류: ${jev.error.orEmpty()}"
             }
-            timingStatus.text =
-                "누적 구간 ${latest.messages.size}개 · 분석 ${"%.2f".format(latest.scanDurationMs)} ms · " +
-                "감지까지 최대 ${latest.eventToCaptureMs} ms · " +
-                "${latest.nodeCount} nodes" + conversationState + "\n" + jevState
+            val captureState = latest?.let {
+                "누적 구간 ${it.messages.size}개 · 분석 ${"%.2f".format(it.scanDurationMs)} ms · " +
+                    "감지까지 최대 ${it.eventToCaptureMs} ms · ${it.nodeCount} nodes"
+            } ?: "저장된 대화 불러옴"
+            timingStatus.text = captureState + conversationState + "\n" + jevState
         } else {
             timingStatus.text = "제타 대화방을 기다리는 중입니다."
         }
 
-        conversation.text = CaptureStore.readLastFormatted(this)
+        conversation.text = formattedConversation
             ?: "접근성 서비스를 켠 다음 제타의 대화 화면으로 이동하세요."
     }
 
@@ -185,6 +224,49 @@ class MainActivity : Activity() {
             .split(':')
             .mapNotNull(ComponentName::unflattenFromString)
             .any { it == expected }
+    }
+
+    private fun showApiKeyDialog() {
+        val input = EditText(this).apply {
+            hint = "TypeSafe API key"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSingleLine = true
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("TypeSafe API 키")
+            .setMessage("키는 이 휴대폰의 Android Keystore로 보호해 저장하며 화면에 다시 표시하지 않습니다.")
+            .setView(input)
+            .setNegativeButton("취소", null)
+            .setPositiveButton("저장") { _, _ ->
+                runCatching { JevApiKeyStore.save(this, input.text.toString()) }
+                    .onSuccess {
+                        refreshJevCredentialStatus()
+                        Toast.makeText(this, "API 키를 휴대폰에 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    }
+                    .onFailure { error ->
+                        Toast.makeText(
+                            this,
+                            error.message ?: "API 키를 저장하지 못했습니다.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+            }
+            .show()
+    }
+
+    private fun retryJev() {
+        if (!JevApiKeyStore.isConfigured(this)) {
+            Toast.makeText(this, "TypeSafe API 키를 먼저 저장하세요.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!CaptureStore.retryJev(this)) {
+            Toast.makeText(
+                this,
+                "현재 다시 분석할 완성된 JEV 범위가 없습니다.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
     }
 
     private fun openZeta() {

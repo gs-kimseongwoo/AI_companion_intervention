@@ -96,6 +96,9 @@ data class JevEvaluationResult(
     val engagementDrop: Double,
     val model: String,
     val latencyMs: Double,
+    val requestLengthChars: Int,
+    val inputTokens: Int?,
+    val outputTokens: Int?,
 )
 
 data class JevEvaluationState(

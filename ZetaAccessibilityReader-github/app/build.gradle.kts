@@ -17,24 +17,6 @@ android {
         versionName = "1.0"
     }
 
-    buildFeatures {
-        buildConfig = true
-    }
-
-    buildTypes {
-        getByName("debug") {
-            buildConfigField(
-                "String",
-                "JEV_ENDPOINT",
-                "\"http://127.0.0.1:8765/evaluate\"",
-            )
-        }
-        release {
-            isMinifyEnabled = false
-            buildConfigField("String", "JEV_ENDPOINT", "\"\"")
-        }
-    }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
