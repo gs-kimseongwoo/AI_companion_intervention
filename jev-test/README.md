@@ -179,6 +179,35 @@ To inspect any point directly:
 .venv/bin/jev-pippa inspect CONVERSATION_ID 17 --radius 4
 ```
 
+## Live Zeta bridge
+
+The same three-question evaluator can accept the Android reader's current
+conversation snapshot. Keep the API key on this computer, not in the APK.
+Start with deterministic mock values:
+
+```bash
+.venv/bin/jev-pippa serve --mock
+adb reverse tcp:8765 tcp:8765
+```
+
+Then install the Reader debug APK and open a Zeta conversation. After the
+latest assistant response is stable for two seconds, the Reader sends the full
+current snapshot to `POST /evaluate`. The response echoes `conversation_id` and
+`revision`; Android discards it if the conversation changed while evaluation
+was in flight. Scores are shown only as observation values and do not trigger
+an intervention or close Zeta.
+
+For a real Jev call, set `TYPESAFE_API_KEY` and omit `--mock`:
+
+```bash
+export TYPESAFE_API_KEY='...'
+.venv/bin/jev-pippa serve
+```
+
+The bridge binds to `127.0.0.1` by default. If it is deliberately exposed on a
+non-local interface, `JEV_BRIDGE_TOKEN` is required and the client must send it
+as a bearer token.
+
 ## Local web explorer
 
 Export the latest real Jev run and start the interactive localhost view:

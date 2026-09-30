@@ -17,9 +17,21 @@ android {
         versionName = "1.0"
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     buildTypes {
+        getByName("debug") {
+            buildConfigField(
+                "String",
+                "JEV_ENDPOINT",
+                "\"http://127.0.0.1:8765/evaluate\"",
+            )
+        }
         release {
             isMinifyEnabled = false
+            buildConfigField("String", "JEV_ENDPOINT", "\"\"")
         }
     }
 
@@ -34,4 +46,8 @@ kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }

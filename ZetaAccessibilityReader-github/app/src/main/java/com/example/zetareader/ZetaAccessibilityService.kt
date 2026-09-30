@@ -46,6 +46,11 @@ class ZetaAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.packageName?.toString() != ZETA_PACKAGE) return
 
+        selectedRoomId(event)?.let { roomId ->
+            CaptureStore.selectConversationRoom(roomId)
+            Log.d(TAG, "대화방 선택 감지: $roomId")
+        }
+
         lastEventUptimeMs = event.eventTime
         // 이미 예약된 작업은 취소하지 않는다. 계속 들어오는 이벤트가 수집을
         // 무한히 뒤로 미루지 않도록 최대 LIVE_POLL_INTERVAL_MS 안에 읽는다.
@@ -115,7 +120,7 @@ class ZetaAccessibilityService : AccessibilityService() {
             overlay?.showWaiting()
             return true
         }
-        if (CaptureStore.beginSession(this)) {
+        if (CaptureStore.beginSession(this, parsed.messages)) {
             // 직전 대화와 화면이 같아도 새 대화방 세션의 첫 화면은 반드시 저장한다.
             lastSignature = ""
         }
@@ -190,10 +195,36 @@ class ZetaAccessibilityService : AccessibilityService() {
     private fun UiNode.containsViewId(expected: String): Boolean =
         viewId == expected || children.any { it.containsViewId(expected) }
 
+    /** room-list-item UUID는 채팅 화면 안에는 없으므로 클릭 이벤트에서 미리 기억한다. */
+    private fun selectedRoomId(event: AccessibilityEvent): String? {
+        if (event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED) return null
+        var current: AccessibilityNodeInfo? = event.source
+        var depth = 0
+        while (current != null && depth < ROOM_NODE_PARENT_LIMIT) {
+            val viewId = current.viewIdResourceName.orEmpty()
+            val parent = if (viewId.startsWith(ROOM_LIST_ITEM_PREFIX)) {
+                null
+            } else {
+                current.parent
+            }
+            current.recycle()
+
+            if (viewId.startsWith(ROOM_LIST_ITEM_PREFIX)) {
+                return viewId.removePrefix(ROOM_LIST_ITEM_PREFIX)
+            }
+            current = parent
+            depth += 1
+        }
+        current?.recycle()
+        return null
+    }
+
     companion object {
         private const val TAG = "ZetaReader"
         private const val ZETA_PACKAGE = "com.scatterlab.messenger"
         private const val CHAT_ROOM_VIEW_ID = "chat-room-screen"
+        private const val ROOM_LIST_ITEM_PREFIX = "room-list-item-"
+        private const val ROOM_NODE_PARENT_LIMIT = 20
         private const val LIVE_POLL_INTERVAL_MS = 500L
         private const val RECENT_EVENT_MAX_AGE_MS = 1_500L
         private const val NON_DIALOGUE_CONFIRMATIONS = 2

@@ -1,5 +1,6 @@
 package com.example.zetareader
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -35,6 +36,11 @@ class MainActivity : Activity() {
         setContentView(buildContent())
 
         val filter = IntentFilter(CaptureStore.ACTION_UPDATED)
+        registerUpdateReceiver(filter)
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun registerUpdateReceiver(filter: IntentFilter) {
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(updateReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
@@ -133,11 +139,31 @@ class MainActivity : Activity() {
 
     private fun refreshCapture() {
         val latest = CaptureStore.latest
+        val snapshot = CaptureStore.latestSnapshot
+        val jev = JevEvaluationCoordinator.latest
         if (latest != null) {
+            val conversationState = snapshot?.let {
+                val room = it.conversationId
+                    .removePrefix("room:")
+                    .let { value -> if (value.length > 12) value.take(12) else value }
+                "\n대화방 $room · 리비전 ${it.revision.take(12)} · " +
+                    "턴 ${it.turns.size}개 · ${if (it.isReadyForEvaluation) "분석 준비" else "갱신 대기"}"
+            }.orEmpty()
+            val jevState = when (jev.phase) {
+                JevEvaluationPhase.IDLE -> "JEV: 대화 완성 대기"
+                JevEvaluationPhase.WAITING -> "JEV: 내용 안정화 대기"
+                JevEvaluationPhase.RUNNING -> "JEV: 분석 중"
+                JevEvaluationPhase.SUCCEEDED -> jev.result?.let { result ->
+                    "JEV 관찰값 · 자연 종료 ${formatScore(result.naturalBreakpoint)} · " +
+                        "맥락 전환 ${formatScore(result.contextShift)} · " +
+                        "참여 저하 ${formatScore(result.engagementDrop)}"
+                } ?: "JEV: 결과 없음"
+                JevEvaluationPhase.FAILED -> "JEV 오류: ${jev.error.orEmpty()}"
+            }
             timingStatus.text =
                 "누적 구간 ${latest.messages.size}개 · 분석 ${"%.2f".format(latest.scanDurationMs)} ms · " +
                 "감지까지 최대 ${latest.eventToCaptureMs} ms · " +
-                "${latest.nodeCount} nodes"
+                "${latest.nodeCount} nodes" + conversationState + "\n" + jevState
         } else {
             timingStatus.text = "새 제타 세션을 기다리는 중입니다."
         }
@@ -146,6 +172,8 @@ class MainActivity : Activity() {
             ?: CaptureStore.readLastFormatted(this)
             ?: "접근성 서비스를 켠 다음 제타의 대화 화면으로 이동하세요."
     }
+
+    private fun formatScore(value: Double): String = "%.3f".format(value)
 
     private fun isReaderServiceEnabled(): Boolean {
         val expected = ComponentName(this, ZetaAccessibilityService::class.java)

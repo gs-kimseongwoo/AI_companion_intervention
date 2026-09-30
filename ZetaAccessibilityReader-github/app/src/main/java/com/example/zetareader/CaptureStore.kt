@@ -8,27 +8,29 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 제타가 전면에 있는 한 번의 실행 구간을 하나의 세션 파일로 보관한다.
- * 화면에서 사라진 메시지도 메모리에 계속 유지해 새 캡처로 덮어쓰지 않는다.
+ * 대화방별 현재 상태와 제타가 전면에 있었던 방문 세션을 함께 보관한다.
+ * 화면에서 사라진 메시지는 삭제하지 않고, A/B/C 방을 오가도 각 상태를 독립적으로 복원한다.
  */
 object CaptureStore {
     const val ACTION_UPDATED = "com.example.zetareader.CAPTURE_UPDATED"
 
     private const val LATEST_FILE = "latest_capture.txt"
     private const val SESSIONS_DIRECTORY = "sessions"
-
-    private data class StoredMessage(
-        var record: MessageRecord,
-        val firstSeenAtEpochMs: Long,
-        var lastUpdatedAtEpochMs: Long,
-    )
+    private const val CONVERSATIONS_DIRECTORY = "conversations"
+    private const val ROOM_PREFIX = "room:"
+    private const val ROOM_SELECTION_TTL_MS = 15_000L
 
     private data class SessionState(
         val startedAtEpochMs: Long,
         val file: File,
-        val messages: MutableList<StoredMessage> = mutableListOf(),
+        val conversation: ConversationState,
         var lastCapture: CaptureResult? = null,
         var endedAtEpochMs: Long? = null,
+    )
+
+    private data class PendingConversation(
+        val conversationId: String,
+        val selectedAtEpochMs: Long,
     )
 
     /** 같은 제타 메시지 ID에 딸린 배경·인물 서술·대사를 하나의 응답으로 묶는다. */
@@ -46,6 +48,8 @@ object CaptureStore {
     )
 
     private var activeSession: SessionState? = null
+    private var registry: ConversationRegistry? = null
+    private var pendingConversation: PendingConversation? = null
 
     @Volatile
     var latest: CaptureResult? = null
@@ -55,21 +59,69 @@ object CaptureStore {
     var latestFormatted: String? = null
         private set
 
+    @Volatile
+    var latestSnapshot: ConversationSnapshot? = null
+        private set
+
+    /** 대화방 목록의 room-list-item UUID를 다음 채팅 화면과 연결한다. */
+    @Synchronized
+    fun selectConversationRoom(roomId: String) {
+        val normalized = roomId.trim().removePrefix(ROOM_PREFIX)
+        if (normalized.isEmpty()) return
+        pendingConversation = PendingConversation(
+            conversationId = "$ROOM_PREFIX$normalized",
+            selectedAtEpochMs = System.currentTimeMillis(),
+        )
+    }
+
     /** @return 이 호출에서 새 세션이 만들어졌으면 true. */
     @Synchronized
-    fun beginSession(context: Context): Boolean {
-        if (activeSession != null) return false
+    fun beginSession(
+        context: Context,
+        visibleMessages: List<MessageRecord>,
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        val preferredConversationId = pendingConversation
+            ?.takeIf { now - it.selectedAtEpochMs <= ROOM_SELECTION_TTL_MS }
+            ?.conversationId
 
-        val startedAt = System.currentTimeMillis()
+        activeSession?.let { active ->
+            if (
+                preferredConversationId == null ||
+                active.conversation.conversationId == preferredConversationId
+            ) {
+                pendingConversation = null
+                return false
+            }
+            finishActiveSession(context, active)
+        }
+
+        pendingConversation = null
+        val conversationRegistry = ensureRegistry(context)
+        val activation = conversationRegistry.activate(
+            preferredConversationId = preferredConversationId,
+            visible = visibleMessages,
+            nowEpochMs = now,
+        )
+        activation.replacedConversationId?.let { previousId ->
+            ConversationStatePersistence.delete(
+                conversationsDirectory(context),
+                previousId,
+            )
+        }
+
         val directory = File(context.filesDir, SESSIONS_DIRECTORY).apply { mkdirs() }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.KOREA)
-            .format(Date(startedAt))
+            .format(Date(now))
         val state = SessionState(
-            startedAtEpochMs = startedAt,
+            startedAtEpochMs = now,
             file = File(directory, "zeta_session_${stamp}.txt"),
+            conversation = activation.state,
         )
         activeSession = state
         latest = null
+        latestSnapshot = activation.state.snapshot()
+        JevEvaluationCoordinator.submit(context, latestSnapshot!!)
         save(context, state)
         notifyUpdated(context)
         return true
@@ -77,15 +129,20 @@ object CaptureStore {
 
     @Synchronized
     fun publish(context: Context, capture: CaptureResult) {
-        if (activeSession == null) beginSession(context)
+        if (activeSession == null) beginSession(context, capture.messages)
         val state = activeSession ?: return
 
-        mergeVisibleMessages(state, capture.messages, capture.capturedAtEpochMs)
+        state.conversation.mergeVisibleMessages(
+            capture.messages,
+            capture.capturedAtEpochMs,
+        )
         val cumulativeCapture = capture.copy(
-            messages = state.messages.map { it.record },
+            messages = state.conversation.messageRecords(),
         )
         state.lastCapture = cumulativeCapture
         latest = cumulativeCapture
+        latestSnapshot = state.conversation.snapshot()
+        JevEvaluationCoordinator.submit(context, latestSnapshot!!)
         save(context, state)
         notifyUpdated(context)
     }
@@ -94,10 +151,7 @@ object CaptureStore {
     @Synchronized
     fun finishSession(context: Context): Boolean {
         val state = activeSession ?: return false
-        state.endedAtEpochMs = System.currentTimeMillis()
-        save(context, state)
-        activeSession = null
-        notifyUpdated(context)
+        finishActiveSession(context, state)
         return true
     }
 
@@ -106,86 +160,11 @@ object CaptureStore {
             context.openFileInput(LATEST_FILE).bufferedReader().use { it.readText() }
         }.getOrNull()
 
-    /** 화면에 동시에 보인 메시지들의 순서를 이용해 기존 누적 목록에 끼워 넣는다. */
-    private fun mergeVisibleMessages(
-        state: SessionState,
-        visible: List<MessageRecord>,
-        seenAtEpochMs: Long,
-    ) {
-        val resolved = MutableList<StoredMessage?>(visible.size) { null }
-
-        visible.forEachIndexed { index, record ->
-            val stored = findExisting(state.messages, record) ?: return@forEachIndexed
-            stored.record = record
-            stored.lastUpdatedAtEpochMs = seenAtEpochMs
-            resolved[index] = stored
-        }
-
-        visible.forEachIndexed { index, record ->
-            if (resolved[index] != null) return@forEachIndexed
-
-            val previous = (index - 1 downTo 0)
-                .firstNotNullOfOrNull { resolved[it] }
-            val next = (index + 1 until visible.size)
-                .firstNotNullOfOrNull { resolved[it] }
-            val insertAt = when {
-                next != null -> state.messages.indexOf(next).coerceAtLeast(0)
-                previous != null -> state.messages.indexOf(previous) + 1
-                else -> state.messages.size
-            }
-            val added = StoredMessage(
-                record = record,
-                firstSeenAtEpochMs = seenAtEpochMs,
-                lastUpdatedAtEpochMs = seenAtEpochMs,
-            )
-            state.messages.add(insertAt.coerceIn(0, state.messages.size), added)
-            resolved[index] = added
-        }
-    }
-
-    private fun findExisting(
-        storedMessages: List<StoredMessage>,
-        incoming: MessageRecord,
-    ): StoredMessage? {
-        incoming.id?.let { id ->
-            storedMessages.firstOrNull {
-                it.record.id == id &&
-                    it.record.segmentIndex == incoming.segmentIndex
-            }?.let { return it }
-
-            // 생성 중에는 ID가 없다가 답변이 완성되면 ID가 붙는다.
-            // 같은 화자의 이어지는 본문이면 기존 임시 항목을 정식 ID로 승격한다.
-            storedMessages.lastOrNull {
-                it.record.id == null &&
-                    it.record.segmentIndex == incoming.segmentIndex &&
-                    it.record.role == incoming.role &&
-                    it.record.kind == incoming.kind &&
-                    it.record.speaker == incoming.speaker &&
-                    textsBelongToSameStream(it.record.text, incoming.text)
-            }?.let { return it }
-        }
-
-        if (incoming.id == null) {
-            return storedMessages.lastOrNull {
-                it.record.id == null &&
-                    it.record.segmentIndex == incoming.segmentIndex &&
-                    it.record.role == incoming.role &&
-                    it.record.kind == incoming.kind &&
-                    it.record.speaker == incoming.speaker
-            }
-        }
-        return null
-    }
-
-    private fun textsBelongToSameStream(old: String, new: String): Boolean {
-        val oldText = old.trim()
-        val newText = new.trim()
-        return oldText == newText ||
-            newText.startsWith(oldText) ||
-            oldText.startsWith(newText)
-    }
-
     private fun save(context: Context, state: SessionState) {
+        ConversationStatePersistence.save(
+            conversationsDirectory(context),
+            state.conversation,
+        )
         val formatted = formatSession(state)
         state.file.writeText(formatted)
         File(context.filesDir, LATEST_FILE).writeText(formatted)
@@ -196,17 +175,42 @@ object CaptureStore {
         context.sendBroadcast(Intent(ACTION_UPDATED).setPackage(context.packageName))
     }
 
+    private fun finishActiveSession(context: Context, state: SessionState) {
+        state.endedAtEpochMs = System.currentTimeMillis()
+        save(context, state)
+        if (activeSession === state) activeSession = null
+        notifyUpdated(context)
+    }
+
+    private fun ensureRegistry(context: Context): ConversationRegistry {
+        registry?.let { return it }
+        return ConversationRegistry(
+            ConversationStatePersistence.loadAll(conversationsDirectory(context)),
+        ).also { registry = it }
+    }
+
+    private fun conversationsDirectory(context: Context): File =
+        File(context.filesDir, CONVERSATIONS_DIRECTORY)
+
     private fun formatSession(state: SessionState): String = buildString {
-        val responses = groupResponses(state.messages)
+        val messages = state.conversation.messages
+        val snapshot = state.conversation.snapshot()
+        val responses = groupResponses(messages)
         val scenarios = groupScenarios(responses)
 
         appendLine("제타 대화 세션")
         appendLine("상태: ${if (state.endedAtEpochMs == null) "기록 중" else "종료"}")
+        appendLine("대화방: ${state.conversation.conversationId}")
+        appendLine("리비전: ${snapshot.revision}")
         appendLine("시작: ${formatDate(state.startedAtEpochMs)}")
         state.endedAtEpochMs?.let { appendLine("종료: ${formatDate(it)}") }
         appendLine("저장 파일: $SESSIONS_DIRECTORY/${state.file.name}")
         appendLine("시나리오: ${scenarios.size}개")
-        appendLine("응답: ${responses.size}개 · 세부 구간: ${state.messages.size}개")
+        appendLine("응답: ${responses.size}개 · 세부 구간: ${messages.size}개")
+        appendLine(
+            "분석 준비: ${if (snapshot.isReadyForEvaluation) "완료" else "대기"} · " +
+                "턴 ${snapshot.turns.size}개",
+        )
         state.lastCapture?.let { capture ->
             appendLine("최근 갱신: ${formatDate(capture.capturedAtEpochMs)}")
             appendLine("최근 화면 분석: ${"%.2f".format(capture.scanDurationMs)} ms")

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Android 11 이상에서 제타 실행 아이콘을 찾기 위한 패키지 공개 범위. -->
     <queries>

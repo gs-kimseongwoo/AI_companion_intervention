@@ -9,6 +9,7 @@ from pathlib import Path
 from .analysis import analyze, dialogue_window
 from .data import DEFAULT_DATASET_URL, deterministic_sample, iter_rows, read_jsonl, write_jsonl
 from .jev import JevClient, MockJevClient, build_state, extract_noul_scores, questions_sha256
+from .live import serve_live_bridge
 from .qwen import QwenOpenAIClient
 from .storage import (
     connect,
@@ -145,6 +146,43 @@ def command_run(args: argparse.Namespace) -> int:
     return _run_evaluations(args, client, model_key)
 
 
+def command_serve(args: argparse.Namespace) -> int:
+    questions = _load_json(args.questions)
+    is_localhost = args.host in {"127.0.0.1", "localhost"}
+    configured_token = os.environ.get("JEV_BRIDGE_TOKEN")
+    if not is_localhost and not configured_token:
+        raise RuntimeError(
+            "Set JEV_BRIDGE_TOKEN before exposing the bridge beyond localhost"
+        )
+    token = None if is_localhost else configured_token
+
+    if args.mock:
+        client = MockJevClient()
+        mode = "mock"
+    else:
+        api_key = os.environ.get("TYPESAFE_API_KEY")
+        if not api_key:
+            raise RuntimeError("Set TYPESAFE_API_KEY, or use --mock for a local check")
+        client = JevClient(
+            api_key,
+            endpoint=args.endpoint,
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+        )
+        mode = "jev"
+
+    serve_live_bridge(
+        host=args.host,
+        port=args.port,
+        client=client,
+        questions=questions,
+        model=args.model,
+        token=token,
+        mode=mode,
+    )
+    return 0
+
+
 def command_run_qwen(args: argparse.Namespace) -> int:
     client = QwenOpenAIClient(
         endpoint=args.endpoint,
@@ -212,6 +250,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--keep-going", action="store_true")
     run.add_argument("--mock", action="store_true", help="Use fake local scores; never Jev output")
     run.set_defaults(func=command_run)
+
+    serve = subparsers.add_parser(
+        "serve", help="Serve live Zeta snapshots to Jev over a local HTTP bridge"
+    )
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS)
+    serve.add_argument("--model", default="jev-latest")
+    serve.add_argument("--endpoint", default="https://api.typesafe.ai/v1/systemone")
+    serve.add_argument("--timeout", type=float, default=90.0)
+    serve.add_argument("--max-retries", type=int, default=5)
+    serve.add_argument("--mock", action="store_true", help="Return deterministic fake scores")
+    serve.set_defaults(func=command_serve)
 
     qwen = subparsers.add_parser(
         "run-qwen", help="Evaluate expanding prefixes with an OpenAI-compatible Qwen server"

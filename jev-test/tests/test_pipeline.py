@@ -5,6 +5,7 @@ import unittest
 from jev_pippa.analysis import add_deltas, classify_transitions, dialogue_window
 from jev_pippa.data import conversation_id, deterministic_sample, normalize_conversation
 from jev_pippa.jev import MockJevClient, _retry_delay, build_state, extract_noul_scores
+from jev_pippa.live import evaluate_live_payload, validate_live_payload
 from jev_pippa.qwen import _binary_probability
 
 
@@ -89,6 +90,40 @@ class PipelineTests(unittest.TestCase):
         score = _binary_probability(response)
         self.assertGreater(score, 0.7)
         self.assertLess(score, 1.0)
+
+    def test_live_payload_echoes_conversation_revision_and_scores(self) -> None:
+        questions = {
+            "context_shift": {},
+            "natural_breakpoint": {},
+            "engagement_drop": {},
+        }
+        response = evaluate_live_payload(
+            {
+                "conversation_id": "room:a",
+                "revision": "rev-1",
+                "turns": [
+                    {"speaker": "human", "text": "안녕"},
+                    {"speaker": "assistant", "text": "반가워."},
+                ],
+            },
+            client=MockJevClient(),
+            questions=questions,
+            model="jev-latest",
+        )
+        self.assertEqual(response["conversation_id"], "room:a")
+        self.assertEqual(response["revision"], "rev-1")
+        self.assertIn("natural_breakpoint", response)
+        self.assertIn("mock-jev", response["model"])
+
+    def test_live_payload_rejects_unknown_speakers(self) -> None:
+        with self.assertRaisesRegex(ValueError, "speaker"):
+            validate_live_payload(
+                {
+                    "conversation_id": "room:a",
+                    "revision": "rev-1",
+                    "turns": [{"speaker": "unknown", "text": "?"}],
+                }
+            )
 
 
 if __name__ == "__main__":
