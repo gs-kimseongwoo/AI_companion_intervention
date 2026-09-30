@@ -40,11 +40,16 @@ object CaptureStore {
         val messages: MutableList<StoredMessage> = mutableListOf(),
     )
 
-    /** 제타의 AI 응답과 그 뒤에 이어지는 사용자 응답을 한 장면 단위로 묶는다. */
+    /** USER RESPONSE와 그 뒤의 AI 내용을 다음 USER RESPONSE 전까지 한 장면으로 묶는다. */
     private data class ScenarioGroup(
         val aiResponses: MutableList<ResponseGroup> = mutableListOf(),
         val userResponses: MutableList<ResponseGroup> = mutableListOf(),
         val unknownResponses: MutableList<ResponseGroup> = mutableListOf(),
+    )
+
+    private data class ScenarioLayout(
+        val introduction: ScenarioGroup,
+        val scenarios: List<ScenarioGroup>,
     )
 
     private var activeSession: SessionState? = null
@@ -196,7 +201,7 @@ object CaptureStore {
         val messages = state.conversation.messages
         val snapshot = state.conversation.snapshot()
         val responses = groupResponses(messages)
-        val scenarios = groupScenarios(responses)
+        val scenarioLayout = groupScenarios(responses)
 
         appendLine("제타 대화 세션")
         appendLine("상태: ${if (state.endedAtEpochMs == null) "기록 중" else "종료"}")
@@ -205,7 +210,8 @@ object CaptureStore {
         appendLine("시작: ${formatDate(state.startedAtEpochMs)}")
         state.endedAtEpochMs?.let { appendLine("종료: ${formatDate(it)}") }
         appendLine("저장 파일: $SESSIONS_DIRECTORY/${state.file.name}")
-        appendLine("시나리오: ${scenarios.size}개")
+        appendLine("도입부: ${if (scenarioLayout.introduction.isEmpty()) "없음" else "있음"}")
+        appendLine("시나리오: ${scenarioLayout.scenarios.size}개")
         appendLine("응답: ${responses.size}개 · 세부 구간: ${messages.size}개")
         appendLine(
             "분석 준비: ${if (snapshot.isReadyForEvaluation) "완료" else "대기"} · " +
@@ -218,24 +224,15 @@ object CaptureStore {
         }
         appendLine()
 
-        scenarios.forEachIndexed { index, scenario ->
+        if (!scenarioLayout.introduction.isEmpty()) {
+            appendLine("===== INTRO =====")
+            appendScenarioSections(scenarioLayout.introduction, userFirst = false)
+            appendLine()
+        }
+
+        scenarioLayout.scenarios.forEachIndexed { index, scenario ->
             appendLine("===== SCENARIO ${index + 1} =====")
-
-            if (scenario.aiResponses.isNotEmpty()) {
-                appendLine("[AI RESPONSE]")
-                appendResponseSection(scenario.aiResponses)
-            }
-
-            if (scenario.userResponses.isNotEmpty()) {
-                appendLine("[USER RESPONSE]")
-                appendResponseSection(scenario.userResponses)
-            }
-
-            if (scenario.unknownResponses.isNotEmpty()) {
-                appendLine("[UNKNOWN RESPONSE]")
-                appendResponseSection(scenario.unknownResponses)
-            }
-
+            appendScenarioSections(scenario, userFirst = true)
             appendLine()
         }
     }
@@ -276,37 +273,52 @@ object CaptureStore {
             message.role
         }
 
-    /** AI 응답 하나와 그 뒤의 사용자 응답을 한 시나리오로 연결한다. */
-    private fun groupScenarios(responses: List<ResponseGroup>): List<ScenarioGroup> {
+    /** 첫 USER 전 AI는 INTRO, 이후에는 USER부터 다음 USER 직전까지가 한 시나리오다. */
+    private fun groupScenarios(responses: List<ResponseGroup>): ScenarioLayout {
+        val introduction = ScenarioGroup()
         val result = mutableListOf<ScenarioGroup>()
-        var current: ScenarioGroup? = null
+        val scenarioIndexes = scenarioIndexesForRoles(responses.map { it.role })
 
-        responses.forEach { response ->
+        responses.forEachIndexed { responseIndex, response ->
+            val scenarioIndex = scenarioIndexes[responseIndex]
+            val target = if (scenarioIndex == null) {
+                introduction
+            } else {
+                while (result.size <= scenarioIndex) result += ScenarioGroup()
+                result[scenarioIndex]
+            }
             when (response.role) {
-                MessageRole.ASSISTANT -> {
-                    current = ScenarioGroup(
-                        aiResponses = mutableListOf(response),
-                    ).also(result::add)
-                }
-
-                MessageRole.USER -> {
-                    val target = current ?: ScenarioGroup().also {
-                        result += it
-                        current = it
-                    }
-                    target.userResponses += response
-                }
-
-                MessageRole.UNKNOWN -> {
-                    val target = current ?: ScenarioGroup().also {
-                        result += it
-                        current = it
-                    }
-                    target.unknownResponses += response
-                }
+                MessageRole.ASSISTANT -> target.aiResponses += response
+                MessageRole.USER -> target.userResponses += response
+                MessageRole.UNKNOWN -> target.unknownResponses += response
             }
         }
-        return result
+        return ScenarioLayout(introduction = introduction, scenarios = result)
+    }
+
+    private fun ScenarioGroup.isEmpty(): Boolean =
+        aiResponses.isEmpty() && userResponses.isEmpty() && unknownResponses.isEmpty()
+
+    private fun StringBuilder.appendScenarioSections(
+        scenario: ScenarioGroup,
+        userFirst: Boolean,
+    ) {
+        if (userFirst && scenario.userResponses.isNotEmpty()) {
+            appendLine("[USER RESPONSE]")
+            appendResponseSection(scenario.userResponses)
+        }
+        if (scenario.aiResponses.isNotEmpty()) {
+            appendLine("[AI RESPONSE]")
+            appendResponseSection(scenario.aiResponses)
+        }
+        if (!userFirst && scenario.userResponses.isNotEmpty()) {
+            appendLine("[USER RESPONSE]")
+            appendResponseSection(scenario.userResponses)
+        }
+        if (scenario.unknownResponses.isNotEmpty()) {
+            appendLine("[UNKNOWN RESPONSE]")
+            appendResponseSection(scenario.unknownResponses)
+        }
     }
 
     /** 한 응답 안에서는 대사/서술을 나누지 않고 화자와 배경만 표시한다. */
@@ -328,4 +340,13 @@ object CaptureStore {
     private fun formatDate(epochMs: Long): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.KOREA)
             .format(Date(epochMs))
+}
+
+/** USER RESPONSE가 새 시나리오를 시작하며, 그 전 응답은 INTRO를 뜻하는 null이다. */
+internal fun scenarioIndexesForRoles(roles: List<MessageRole>): List<Int?> {
+    var scenarioIndex = -1
+    return roles.map { role ->
+        if (role == MessageRole.USER) scenarioIndex += 1
+        scenarioIndex.takeIf { it >= 0 }
+    }
 }

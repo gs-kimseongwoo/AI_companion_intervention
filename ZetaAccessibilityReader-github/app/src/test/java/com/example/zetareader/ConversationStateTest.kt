@@ -10,6 +10,24 @@ import org.junit.Test
 
 class ConversationStateTest {
     @Test
+    fun userResponseStartsScenarioAndNextUserResponseStartsAnother() {
+        assertEquals(
+            listOf(null, null, null, 0, 0, 0, 1),
+            scenarioIndexesForRoles(
+                listOf(
+                    MessageRole.ASSISTANT,
+                    MessageRole.ASSISTANT,
+                    MessageRole.ASSISTANT,
+                    MessageRole.USER,
+                    MessageRole.ASSISTANT,
+                    MessageRole.ASSISTANT,
+                    MessageRole.USER,
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun repeatedPendingAssistantEditsReplaceOneTurn() {
         val state = ConversationState("room:a", createdAtEpochMs = 100L)
         state.mergeVisibleMessages(
