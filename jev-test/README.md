@@ -206,6 +206,17 @@ export TYPESAFE_API_KEY='...'
 .venv/bin/jev-pippa serve
 ```
 
+On macOS, the key can instead be stored once in Keychain and reused without
+putting it in a source file or shell history:
+
+```bash
+scripts/save_typesafe_api_key.sh
+scripts/serve_live_jev.sh
+```
+
+The first script accepts the key with hidden input. The second reads it from
+Keychain only for the bridge process and always starts the real Jev mode.
+
 The bridge binds to `127.0.0.1` by default. If it is deliberately exposed on a
 non-local interface, `JEV_BRIDGE_TOKEN` is required and the client must send it
 as a bearer token.
