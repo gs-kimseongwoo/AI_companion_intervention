@@ -1,8 +1,6 @@
 package com.example.zetareader
 
 import java.nio.file.Files
-import java.time.ZoneId
-import java.time.ZonedDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -80,6 +78,7 @@ class ConversationStateTest {
         assertEquals("assistant-1", snapshot.turns.last().messageId)
         assertFalse(snapshot.turns.last().isPending)
         assertEquals(pendingRevision, snapshot.revision)
+        assertEquals(110L, state.updatedAtEpochMs)
     }
 
     @Test
@@ -121,22 +120,26 @@ class ConversationStateTest {
     }
 
     @Test
-    fun jevSessionContinuesAcrossMidnightButResetsOnLaterNewDate() {
-        val zone = ZoneId.of("Asia/Seoul")
-        val state = ConversationState("room:a", createdAtEpochMs = epoch(2026, 9, 29, 23, zone))
+    fun jevContinuesWithinThreeHoursAndResetsAfterThreeHoursAway() {
+        val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.jevStartMessageId = "user-1"
+        state.markLeft(1_000L)
 
-        assertTrue(state.prepareJevSession(epoch(2026, 9, 29, 23, zone), zone))
-        state.jevStartMessageId = "user-night"
-        state.markVisitEnded(epoch(2026, 9, 30, 1, zone))
+        assertFalse(state.markOpened(1_000L + JEV_INACTIVITY_TIMEOUT_MS - 1L))
+        assertEquals("user-1", state.jevStartMessageId)
 
-        assertFalse(state.prepareJevSession(epoch(2026, 9, 30, 2, zone), zone))
-        assertEquals("user-night", state.jevStartMessageId)
-        assertEquals("2026-09-30", state.jevSessionDate)
-
-        state.markVisitEnded(epoch(2026, 9, 30, 3, zone))
-        assertTrue(state.prepareJevSession(epoch(2026, 10, 1, 9, zone), zone))
+        state.markLeft(10_000L)
+        assertTrue(state.markOpened(10_000L + JEV_INACTIVITY_TIMEOUT_MS))
         assertNull(state.jevStartMessageId)
-        assertEquals("2026-10-01", state.jevSessionDate)
+    }
+
+    @Test
+    fun continuousConversationDoesNotResetOnlyBecauseTimePassed() {
+        val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.jevStartMessageId = "user-1"
+
+        assertFalse(state.markOpened(100L + JEV_INACTIVITY_TIMEOUT_MS * 2))
+        assertEquals("user-1", state.jevStartMessageId)
     }
 
     @Test
@@ -161,6 +164,108 @@ class ConversationStateTest {
 
         assertEquals(2, state.messages.size)
         assertFalse(state.snapshot().turns.single().text.contains("사라질 서술"))
+    }
+
+    @Test
+    fun newFlowFromEarlierMessageDeletesOldTail() {
+        val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.mergeVisibleMessages(
+            listOf(
+                message("user-1", MessageRole.USER, "첫 질문"),
+                message("ai-1", MessageRole.ASSISTANT, "첫 답변"),
+                message("user-old", MessageRole.USER, "사라질 질문"),
+                message("ai-old", MessageRole.ASSISTANT, "사라질 답변"),
+            ),
+            seenAtEpochMs = 110L,
+        )
+
+        val merge = state.mergeVisibleMessages(
+            listOf(
+                message("ai-1", MessageRole.ASSISTANT, "첫 답변"),
+                message("user-new", MessageRole.USER, "새 흐름"),
+                message(null, MessageRole.ASSISTANT, "새 답변"),
+            ),
+            seenAtEpochMs = 120L,
+        )
+
+        assertEquals("user-new", merge.replacementStartUserMessageId)
+        assertEquals(
+            listOf("user-1", "ai-1", "user-new", null),
+            state.snapshot().turns.map { it.messageId },
+        )
+        assertFalse(state.snapshot().turns.any { it.text.contains("사라질") })
+    }
+
+    @Test
+    fun editingEarlierUserMessageDeletesOldTail() {
+        val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.mergeVisibleMessages(
+            listOf(
+                message("user-1", MessageRole.USER, "수정 전"),
+                message("ai-old", MessageRole.ASSISTANT, "사라질 답변"),
+                message("user-old", MessageRole.USER, "사라질 질문"),
+            ),
+            seenAtEpochMs = 110L,
+        )
+
+        val merge = state.mergeVisibleMessages(
+            listOf(
+                message("user-1", MessageRole.USER, "수정 후"),
+                message(null, MessageRole.ASSISTANT, "새 답변"),
+            ),
+            seenAtEpochMs = 120L,
+        )
+
+        assertEquals("user-1", merge.replacementStartUserMessageId)
+        assertEquals(listOf("user-1", null), state.snapshot().turns.map { it.messageId })
+        assertFalse(state.snapshot().turns.any { it.text.contains("사라질") })
+    }
+
+    @Test
+    fun scrollingToKnownOlderMessagesDoesNotDeleteTailOrChangeTime() {
+        val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        val all = listOf(
+            message("user-1", MessageRole.USER, "첫 질문"),
+            message("ai-1", MessageRole.ASSISTANT, "첫 답변"),
+            message("user-2", MessageRole.USER, "둘째 질문"),
+            message("ai-2", MessageRole.ASSISTANT, "둘째 답변"),
+        )
+        state.mergeVisibleMessages(all, seenAtEpochMs = 110L)
+
+        val merge = state.mergeVisibleMessages(all.take(2), seenAtEpochMs = 120L)
+
+        assertFalse(merge.changed)
+        assertEquals(110L, state.updatedAtEpochMs)
+        assertEquals(4, state.snapshot().turns.size)
+    }
+
+    @Test
+    fun messageMissingBetweenTwoVisibleAnchorsIsDeleted() {
+        val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.mergeVisibleMessages(
+            listOf(
+                message("user-1", MessageRole.USER, "첫 질문"),
+                message("ai-delete", MessageRole.ASSISTANT, "삭제할 답변"),
+                message("user-2", MessageRole.USER, "둘째 질문"),
+                message("ai-2", MessageRole.ASSISTANT, "둘째 답변"),
+            ),
+            seenAtEpochMs = 110L,
+        )
+
+        state.mergeVisibleMessages(
+            listOf(
+                message("user-1", MessageRole.USER, "첫 질문"),
+                message("user-2", MessageRole.USER, "둘째 질문"),
+                message("ai-2", MessageRole.ASSISTANT, "둘째 답변"),
+            ),
+            seenAtEpochMs = 120L,
+        )
+
+        assertEquals(
+            listOf("user-1", "user-2", "ai-2"),
+            state.snapshot().turns.map { it.messageId },
+        )
+        assertFalse(state.snapshot().turns.any { it.text.contains("삭제할") })
     }
 
     @Test
@@ -230,9 +335,9 @@ class ConversationStateTest {
                 ),
                 seenAtEpochMs = 120L,
             )
-            state.prepareJevSession(121L, ZoneId.of("UTC"))
+            state.markOpened(121L)
             state.jevStartMessageId = "user-1"
-            state.markVisitEnded(130L)
+            state.markLeft(130L)
             val expected = state.snapshot()
 
             ConversationStatePersistence.save(directory, state)
@@ -243,9 +348,9 @@ class ConversationStateTest {
             assertEquals(expected.revision, actual.revision)
             assertEquals(expected.turns, actual.turns)
             assertEquals(120L, actual.updatedAtEpochMs)
-            assertEquals(state.jevSessionDate, restored.jevSessionDate)
             assertEquals("user-1", restored.jevStartMessageId)
-            assertEquals(130L, restored.lastVisitEndedAtEpochMs)
+            assertEquals(121L, restored.lastOpenedAtEpochMs)
+            assertEquals(130L, restored.lastLeftAtEpochMs)
         } finally {
             directory.deleteRecursively()
         }
@@ -264,13 +369,4 @@ class ConversationStateTest {
         segmentIndex = segmentIndex,
     )
 
-    private fun epoch(
-        year: Int,
-        month: Int,
-        day: Int,
-        hour: Int,
-        zone: ZoneId,
-    ): Long = ZonedDateTime.of(year, month, day, hour, 0, 0, 0, zone)
-        .toInstant()
-        .toEpochMilli()
 }

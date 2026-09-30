@@ -14,7 +14,7 @@ import java.security.MessageDigest
 internal object ConversationStatePersistence {
     private const val FILE_SUFFIX = ".conversation"
     private const val MAGIC = 0x5A435331 // ZCS1
-    private const val VERSION = 2
+    private const val VERSION = 3
     private const val MAX_STRING_BYTES = 16 * 1024 * 1024
     private const val MAX_MESSAGES = 100_000
 
@@ -40,9 +40,9 @@ internal object ConversationStatePersistence {
             output.writeString(state.conversationId)
             output.writeLong(state.createdAtEpochMs)
             output.writeLong(state.updatedAtEpochMs)
-            output.writeNullableString(state.jevSessionDate)
             output.writeNullableString(state.jevStartMessageId)
-            output.writeNullableLong(state.lastVisitEndedAtEpochMs)
+            output.writeLong(state.lastOpenedAtEpochMs)
+            output.writeNullableLong(state.lastLeftAtEpochMs)
             output.writeInt(state.messages.size)
             state.messages.forEach { stored ->
                 output.writeNullableString(stored.record.id)
@@ -80,9 +80,28 @@ internal object ConversationStatePersistence {
         val conversationId = input.readString()
         val createdAt = input.readLong()
         val updatedAt = input.readLong()
-        val jevSessionDate = if (version >= 2) input.readNullableString() else null
-        val jevStartMessageId = if (version >= 2) input.readNullableString() else null
-        val lastVisitEndedAt = if (version >= 2) input.readNullableLong() else null
+        val timing = when (version) {
+            1 -> PersistedTiming(
+                jevStartMessageId = null,
+                lastOpenedAtEpochMs = updatedAt,
+                lastLeftAtEpochMs = null,
+            )
+            2 -> {
+                input.readNullableString() // 이전 날짜 기준 필드: 더 이상 사용하지 않는다.
+                val jevStartMessageId = input.readNullableString()
+                val lastLeftAtEpochMs = input.readNullableLong()
+                PersistedTiming(
+                    jevStartMessageId = jevStartMessageId,
+                    lastOpenedAtEpochMs = maxOf(updatedAt, lastLeftAtEpochMs ?: updatedAt),
+                    lastLeftAtEpochMs = lastLeftAtEpochMs,
+                )
+            }
+            else -> PersistedTiming(
+                jevStartMessageId = input.readNullableString(),
+                lastOpenedAtEpochMs = input.readLong(),
+                lastLeftAtEpochMs = input.readNullableLong(),
+            )
+        }
         val count = input.readInt()
         check(count in 0..MAX_MESSAGES) { "메시지 개수가 올바르지 않습니다: $count" }
 
@@ -114,11 +133,17 @@ internal object ConversationStatePersistence {
             createdAtEpochMs = createdAt,
             messages = messages,
             updatedAtEpochMs = updatedAt,
-            jevSessionDate = jevSessionDate,
-            jevStartMessageId = jevStartMessageId,
-            lastVisitEndedAtEpochMs = lastVisitEndedAt,
+            jevStartMessageId = timing.jevStartMessageId,
+            lastOpenedAtEpochMs = timing.lastOpenedAtEpochMs,
+            lastLeftAtEpochMs = timing.lastLeftAtEpochMs,
         )
     }
+
+    private data class PersistedTiming(
+        val jevStartMessageId: String?,
+        val lastOpenedAtEpochMs: Long,
+        val lastLeftAtEpochMs: Long?,
+    )
 
     private fun fileFor(directory: File, conversationId: String): File {
         val digest = MessageDigest.getInstance("SHA-256")

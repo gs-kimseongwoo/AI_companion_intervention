@@ -73,7 +73,7 @@ class MainActivity : Activity() {
             setTextColor(Color.rgb(25, 35, 50))
         })
         outer.addView(TextView(this).apply {
-            text = "제타가 앞에 떠 있는 동안 0.5초 간격으로 대화 변화를 확인합니다.\n오버레이를 5초간 누르면 이 화면에서 저장 기록을 볼 수 있습니다."
+            text = "제타가 앞에 떠 있는 동안 0.5초 간격으로 대화 변화를 확인합니다.\n오버레이를 5초간 누르면 이 화면에서 현재 대화를 볼 수 있습니다."
             textSize = 15f
             setTextColor(Color.DKGRAY)
             setPadding(0, dp(6), 0, dp(14))
@@ -166,7 +166,7 @@ class MainActivity : Activity() {
                 "감지까지 최대 ${latest.eventToCaptureMs} ms · " +
                 "${latest.nodeCount} nodes" + conversationState + "\n" + jevState
         } else {
-            timingStatus.text = "새 제타 세션을 기다리는 중입니다."
+            timingStatus.text = "제타 대화방을 기다리는 중입니다."
         }
 
         conversation.text = CaptureStore.latestFormatted

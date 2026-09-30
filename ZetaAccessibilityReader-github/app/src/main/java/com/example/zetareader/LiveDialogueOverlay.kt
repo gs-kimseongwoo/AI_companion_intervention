@@ -38,7 +38,7 @@ class LiveDialogueOverlay(
                 isHolding = false
                 textView.alpha = 1f
                 textView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                openSavedSession()
+                openCurrentConversation()
                 return
             }
             showHoldProgress()
@@ -78,7 +78,7 @@ class LiveDialogueOverlay(
     }
 
     fun showWaiting() {
-        render("● 실시간 읽기\n5초 누르면 저장 기록 보기\n제타 대화 화면을 기다리는 중…")
+        render("● 실시간 읽기\n5초 누르면 현재 대화 보기\n제타 대화 화면을 기다리는 중…")
     }
 
     fun show(messages: List<MessageRecord>, scanDurationMs: Double) {
@@ -113,7 +113,7 @@ class LiveDialogueOverlay(
 
         render(
             "● 실시간 읽기 · ${duration}ms\n" +
-                "5초 누르면 저장 기록 보기\n" +
+                "5초 누르면 현재 대화 보기\n" +
                 "$roleLabel$speaker\n" +
                 body,
         )
@@ -175,12 +175,12 @@ class LiveDialogueOverlay(
 
     private fun showHoldProgress() {
         textView.text =
-            "저장 기록 열기: ${holdSecondsRemaining}초\n" +
+            "현재 대화 열기: ${holdSecondsRemaining}초\n" +
             "계속 누르고 있으세요\n" +
             "손을 떼면 취소됩니다"
     }
 
-    private fun openSavedSession() {
+    private fun openCurrentConversation() {
         service.startActivity(
             Intent(service, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

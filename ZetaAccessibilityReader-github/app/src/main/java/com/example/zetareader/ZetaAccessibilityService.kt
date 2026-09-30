@@ -61,7 +61,7 @@ class ZetaAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(captureRunnable)
         captureScheduled = false
         overlay?.hide()
-        finishConversationSession()
+        leaveConversation()
     }
 
     override fun onDestroy() {
@@ -69,7 +69,7 @@ class ZetaAccessibilityService : AccessibilityService() {
         captureScheduled = false
         overlay?.hide()
         overlay = null
-        finishConversationSession()
+        leaveConversation()
         super.onDestroy()
     }
 
@@ -84,13 +84,13 @@ class ZetaAccessibilityService : AccessibilityService() {
         val scanStartedNs = SystemClock.elapsedRealtimeNanos()
         val root = rootInActiveWindow ?: run {
             overlay?.hide()
-            finishConversationSession()
+            leaveConversation()
             return false
         }
         if (root.packageName?.toString() != ZETA_PACKAGE) {
             root.recycle()
             overlay?.hide()
-            finishConversationSession()
+            leaveConversation()
             return false
         }
         val counter = intArrayOf(0)
@@ -106,7 +106,7 @@ class ZetaAccessibilityService : AccessibilityService() {
             overlay?.hide()
             consecutiveNonDialogueCaptures += 1
             if (consecutiveNonDialogueCaptures >= NON_DIALOGUE_CONFIRMATIONS) {
-                finishConversationSession()
+                leaveConversation()
             }
             return true
         }
@@ -120,8 +120,8 @@ class ZetaAccessibilityService : AccessibilityService() {
             overlay?.showWaiting()
             return true
         }
-        if (CaptureStore.beginSession(this, parsed.messages)) {
-            // 직전 대화와 화면이 같아도 새 대화방 세션의 첫 화면은 반드시 저장한다.
+        if (CaptureStore.activateConversation(this, parsed.messages)) {
+            // 직전 화면과 내용이 같아도 새로 연 대화방의 첫 화면은 반드시 반영한다.
             lastSignature = ""
         }
         detectedUserSpeaker = parsed.detectedUserSpeaker ?: detectedUserSpeaker
@@ -159,12 +159,12 @@ class ZetaAccessibilityService : AccessibilityService() {
         return true
     }
 
-    private fun finishConversationSession() {
-        if (CaptureStore.finishSession(this)) {
+    private fun leaveConversation() {
+        if (CaptureStore.leaveConversation(this)) {
             lastSignature = ""
             detectedUserSpeaker = null
             consecutiveNonDialogueCaptures = 0
-            Log.d(TAG, "제타 세션 저장 완료")
+            Log.d(TAG, "제타 대화방 퇴장 시각 저장 완료")
         }
     }
 

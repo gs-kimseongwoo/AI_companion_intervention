@@ -7,28 +7,22 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * 대화방별 현재 상태와 제타가 전면에 있었던 방문 세션을 함께 보관한다.
- * 화면에서 사라진 메시지는 삭제하지 않고, A/B/C 방을 오가도 각 상태를 독립적으로 복원한다.
- */
+/** 대화방마다 현재 활성 대화 하나만 보관한다. */
 object CaptureStore {
     const val ACTION_UPDATED = "com.example.zetareader.CAPTURE_UPDATED"
 
-    private const val LATEST_FILE = "latest_capture.txt"
-    private const val SESSIONS_DIRECTORY = "sessions"
+    private const val LEGACY_LATEST_FILE = "latest_capture.txt"
+    private const val LEGACY_SESSIONS_DIRECTORY = "sessions"
     private const val CONVERSATIONS_DIRECTORY = "conversations"
     private const val MAX_CONVERSATIONS = 10
     private const val ROOM_PREFIX = "room:"
     private const val ROOM_SELECTION_TTL_MS = 15_000L
 
-    private data class SessionState(
-        val startedAtEpochMs: Long,
-        val file: File,
+    private data class ActiveConversation(
         val conversation: ConversationState,
         val observedMessageIds: MutableSet<String>,
         var baselineCapturePending: Boolean = true,
         var lastCapture: CaptureResult? = null,
-        var endedAtEpochMs: Long? = null,
     )
 
     private data class PendingConversation(
@@ -55,9 +49,10 @@ object CaptureStore {
         val scenarios: List<ScenarioGroup>,
     )
 
-    private var activeSession: SessionState? = null
+    private var activeConversation: ActiveConversation? = null
     private var registry: ConversationRegistry? = null
     private var pendingConversation: PendingConversation? = null
+    private var legacyFilesRemoved = false
 
     @Volatile
     var latest: CaptureResult? = null
@@ -82,9 +77,9 @@ object CaptureStore {
         )
     }
 
-    /** @return 이 호출에서 새 세션이 만들어졌으면 true. */
+    /** @return 이 호출에서 다른 대화방을 열었으면 true. */
     @Synchronized
-    fun beginSession(
+    fun activateConversation(
         context: Context,
         visibleMessages: List<MessageRecord>,
     ): Boolean {
@@ -93,7 +88,7 @@ object CaptureStore {
             ?.takeIf { now - it.selectedAtEpochMs <= ROOM_SELECTION_TTL_MS }
             ?.conversationId
 
-        activeSession?.let { active ->
+        activeConversation?.let { active ->
             if (
                 preferredConversationId == null ||
                 active.conversation.conversationId == preferredConversationId
@@ -101,7 +96,7 @@ object CaptureStore {
                 pendingConversation = null
                 return false
             }
-            finishActiveSession(context, active)
+            leaveActiveConversation(context, active, now)
         }
 
         pendingConversation = null
@@ -117,27 +112,30 @@ object CaptureStore {
                 previousId,
             )
         }
-        activation.state.prepareJevSession(now)
+        val resetAfterInactivity = activation.state.markOpened(now)
 
-        val directory = File(context.filesDir, SESSIONS_DIRECTORY).apply { mkdirs() }
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.KOREA)
-            .format(Date(now))
-        val state = SessionState(
-            startedAtEpochMs = now,
-            file = File(directory, "zeta_session_${stamp}.txt"),
+        val state = ActiveConversation(
             conversation = activation.state,
             observedMessageIds = buildSet {
                 addAll(activation.state.messages.mapNotNull { it.record.id })
                 addAll(visibleMessages.mapNotNull { it.id })
             }.toMutableSet(),
         )
-        activeSession = state
+        activeConversation = state
         latest = null
         latestSnapshot = activation.state.snapshot()
-        JevEvaluationCoordinator.resetToBaseline(
-            context,
-            activation.state.conversationId,
-        )
+        val currentEvaluation = activation.state.jevStartMessageId
+            ?.let(activation.state::evaluationSnapshot)
+        val displayedJev = JevEvaluationCoordinator.latest
+        val canKeepDisplayedJev = !resetAfterInactivity &&
+            displayedJev.conversationId == activation.state.conversationId &&
+            displayedJev.revision == currentEvaluation?.revision
+        if (!canKeepDisplayedJev) {
+            JevEvaluationCoordinator.resetToBaseline(
+                context,
+                activation.state.conversationId,
+            )
+        }
         save(context, state)
         notifyUpdated(context)
         return true
@@ -145,20 +143,29 @@ object CaptureStore {
 
     @Synchronized
     fun publish(context: Context, capture: CaptureResult) {
-        if (activeSession == null) beginSession(context, capture.messages)
-        val state = activeSession ?: return
+        if (activeConversation == null) activateConversation(context, capture.messages)
+        val state = activeConversation ?: return
         val isBaselineCapture = state.baselineCapturePending
-        if (!isBaselineCapture && state.conversation.jevStartMessageId == null) {
-            state.conversation.jevStartMessageId = firstNewUserMessageId(
+        val newUserMessageId = if (isBaselineCapture) {
+            null
+        } else {
+            firstNewUserMessageId(
                 visible = capture.messages,
                 observedMessageIds = state.observedMessageIds,
             )
         }
 
-        state.conversation.mergeVisibleMessages(
+        val merge = state.conversation.mergeVisibleMessages(
             capture.messages,
             capture.capturedAtEpochMs,
         )
+        val currentStart = state.conversation.jevStartMessageId
+        val currentStartStillExists = currentStart
+            ?.let(state.conversation::evaluationSnapshot) != null
+        if (!isBaselineCapture && (currentStart == null || !currentStartStillExists)) {
+            state.conversation.jevStartMessageId =
+                merge.replacementStartUserMessageId ?: newUserMessageId
+        }
         state.observedMessageIds += capture.messages.mapNotNull { it.id }
         state.baselineCapturePending = false
         val cumulativeCapture = capture.copy(
@@ -167,7 +174,20 @@ object CaptureStore {
         state.lastCapture = cumulativeCapture
         latest = cumulativeCapture
         latestSnapshot = state.conversation.snapshot()
-        if (!isBaselineCapture) {
+        if (isBaselineCapture) {
+            val currentEvaluation = state.conversation.jevStartMessageId
+                ?.let(state.conversation::evaluationSnapshot)
+            val displayedJev = JevEvaluationCoordinator.latest
+            if (
+                displayedJev.conversationId != state.conversation.conversationId ||
+                displayedJev.revision != currentEvaluation?.revision
+            ) {
+                JevEvaluationCoordinator.resetToBaseline(
+                    context,
+                    state.conversation.conversationId,
+                )
+            }
+        } else {
             state.conversation.jevStartMessageId
                 ?.let(state.conversation::evaluationSnapshot)
                 ?.let { JevEvaluationCoordinator.submit(context, it) }
@@ -176,49 +196,51 @@ object CaptureStore {
         notifyUpdated(context)
     }
 
-    /** @return 진행 중이던 세션을 이번 호출에서 종료했으면 true. */
+    /** @return 열려 있던 대화방의 퇴장 시각을 기록했으면 true. */
     @Synchronized
-    fun finishSession(context: Context): Boolean {
-        val state = activeSession ?: return false
-        finishActiveSession(context, state)
+    fun leaveConversation(context: Context): Boolean {
+        val state = activeConversation ?: return false
+        leaveActiveConversation(context, state, System.currentTimeMillis())
         return true
     }
 
-    fun readLastFormatted(context: Context): String? =
-        latestFormatted ?: runCatching {
-            context.openFileInput(LATEST_FILE).bufferedReader().use { it.readText() }
-        }.getOrNull()
+    @Synchronized
+    fun readLastFormatted(context: Context): String? = latestFormatted
+        ?: ensureRegistry(context)
+            .allStates()
+            .maxByOrNull { it.lastOpenedAtEpochMs }
+            ?.let { formatConversation(it, lastCapture = null) }
 
-    private fun save(context: Context, state: SessionState) {
+    private fun save(context: Context, state: ActiveConversation) {
         ConversationStatePersistence.save(
             conversationsDirectory(context),
             state.conversation,
         )
-        val formatted = formatSession(state)
-        state.file.writeText(formatted)
-        File(context.filesDir, LATEST_FILE).writeText(formatted)
-        latestFormatted = formatted
+        latestFormatted = formatConversation(state.conversation, state.lastCapture)
     }
 
     private fun notifyUpdated(context: Context) {
         context.sendBroadcast(Intent(ACTION_UPDATED).setPackage(context.packageName))
     }
 
-    private fun finishActiveSession(context: Context, state: SessionState) {
-        val endedAt = System.currentTimeMillis()
-        state.endedAtEpochMs = endedAt
-        state.conversation.markVisitEnded(endedAt)
+    private fun leaveActiveConversation(
+        context: Context,
+        state: ActiveConversation,
+        leftAtEpochMs: Long,
+    ) {
+        state.conversation.markLeft(leftAtEpochMs)
         save(context, state)
-        if (activeSession === state) activeSession = null
+        if (activeConversation === state) activeConversation = null
         notifyUpdated(context)
     }
 
     private fun ensureRegistry(context: Context): ConversationRegistry {
+        removeLegacyFiles(context)
         registry?.let { return it }
         val directory = conversationsDirectory(context)
         val loaded = ConversationStatePersistence.loadAll(directory)
         val retained = loaded
-            .sortedByDescending { it.updatedAtEpochMs }
+            .sortedByDescending { it.lastOpenedAtEpochMs }
             .take(MAX_CONVERSATIONS)
         val retainedIds = retained.map { it.conversationId }.toSet()
         loaded
@@ -233,21 +255,33 @@ object CaptureStore {
     private fun conversationsDirectory(context: Context): File =
         File(context.filesDir, CONVERSATIONS_DIRECTORY)
 
-    private fun formatSession(state: SessionState): String = buildString {
-        val messages = state.conversation.messages
-        val snapshot = state.conversation.snapshot()
-        val evaluationSnapshot = state.conversation.jevStartMessageId
-            ?.let(state.conversation::evaluationSnapshot)
+    private fun removeLegacyFiles(context: Context) {
+        if (legacyFilesRemoved) return
+        File(context.filesDir, LEGACY_SESSIONS_DIRECTORY).deleteRecursively()
+        File(context.filesDir, LEGACY_LATEST_FILE).delete()
+        legacyFilesRemoved = true
+    }
+
+    private fun formatConversation(
+        conversation: ConversationState,
+        lastCapture: CaptureResult?,
+    ): String = buildString {
+        val messages = conversation.messages
+        val snapshot = conversation.snapshot()
+        val evaluationSnapshot = conversation.jevStartMessageId
+            ?.let(conversation::evaluationSnapshot)
         val responses = groupResponses(messages)
         val scenarioLayout = groupScenarios(responses)
 
-        appendLine("제타 대화 세션")
-        appendLine("상태: ${if (state.endedAtEpochMs == null) "기록 중" else "종료"}")
-        appendLine("대화방: ${state.conversation.conversationId}")
+        appendLine("제타 대화 상태")
+        appendLine("대화방: ${conversation.conversationId}")
         appendLine("리비전: ${snapshot.revision}")
-        appendLine("시작: ${formatDate(state.startedAtEpochMs)}")
-        state.endedAtEpochMs?.let { appendLine("종료: ${formatDate(it)}") }
-        appendLine("저장 파일: $SESSIONS_DIRECTORY/${state.file.name}")
+        appendLine("마지막 내용 변경: ${formatDate(conversation.updatedAtEpochMs)}")
+        appendLine("마지막 입장: ${formatDate(conversation.lastOpenedAtEpochMs)}")
+        appendLine(
+            conversation.lastLeftAtEpochMs?.let { "마지막 퇴장: ${formatDate(it)}" }
+                ?: "현재 상태: 대화방 열림",
+        )
         appendLine("도입부: ${if (scenarioLayout.introduction.isEmpty()) "없음" else "있음"}")
         appendLine("시나리오: ${scenarioLayout.scenarios.size}개")
         appendLine("응답: ${responses.size}개 · 세부 구간: ${messages.size}개")
@@ -260,7 +294,7 @@ object CaptureStore {
                     if (evaluationSnapshot.isReadyForEvaluation) "분석 준비" else "AI 응답 대기"
             },
         )
-        state.lastCapture?.let { capture ->
+        lastCapture?.let { capture ->
             appendLine("최근 갱신: ${formatDate(capture.capturedAtEpochMs)}")
             appendLine("최근 화면 분석: ${"%.2f".format(capture.scanDurationMs)} ms")
             appendLine("최근 변화 감지/저장: 최대 ${capture.eventToCaptureMs} ms")

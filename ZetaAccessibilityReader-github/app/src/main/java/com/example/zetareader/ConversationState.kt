@@ -1,13 +1,23 @@
 package com.example.zetareader
 
 import java.security.MessageDigest
-import java.time.Instant
-import java.time.ZoneId
+
+internal const val JEV_INACTIVITY_TIMEOUT_MS = 3 * 60 * 60 * 1_000L
 
 internal data class StoredMessage(
     var record: MessageRecord,
     val firstSeenAtEpochMs: Long,
     var lastUpdatedAtEpochMs: Long,
+)
+
+internal data class MergeResult(
+    val changed: Boolean,
+    /** 과거 흐름을 새 흐름으로 교체했을 때 JEV가 다시 시작할 USER 메시지. */
+    val replacementStartUserMessageId: String? = null,
+)
+
+private data class TailReplacement(
+    val startUserMessageId: String?,
 )
 
 /**
@@ -21,51 +31,50 @@ internal class ConversationState(
     val createdAtEpochMs: Long,
     val messages: MutableList<StoredMessage> = mutableListOf(),
     var updatedAtEpochMs: Long = createdAtEpochMs,
-    var jevSessionDate: String? = null,
     var jevStartMessageId: String? = null,
-    var lastVisitEndedAtEpochMs: Long? = null,
+    var lastOpenedAtEpochMs: Long = createdAtEpochMs,
+    var lastLeftAtEpochMs: Long? = null,
 ) {
-    /**
-     * 같은 날짜에는 방을 오가도 JEV 시작점을 유지한다. 전날 방문이 자정을 넘어
-     * 오늘 끝난 경우도 연속 사용으로 보고 유지하며, 그 밖의 새 날짜 입장은 초기화한다.
-     */
-    fun prepareJevSession(
+    /** 방을 떠난 지 3시간 이상이면 기존 내용은 새 JEV 기준선으로만 사용한다. */
+    fun markOpened(
         nowEpochMs: Long,
-        zoneId: ZoneId = ZoneId.systemDefault(),
+        inactivityTimeoutMs: Long = JEV_INACTIVITY_TIMEOUT_MS,
     ): Boolean {
-        val today = localDate(nowEpochMs, zoneId)
-        val endedToday = lastVisitEndedAtEpochMs
-            ?.let { localDate(it, zoneId) == today }
-            ?: false
-        val shouldReset = jevSessionDate == null ||
-            (jevSessionDate != today && !endedToday)
-
+        val shouldReset = lastLeftAtEpochMs?.let { leftAt ->
+            (nowEpochMs - leftAt).coerceAtLeast(0L) >= inactivityTimeoutMs
+        } ?: false
         if (shouldReset) {
-            jevSessionDate = today
             jevStartMessageId = null
-        } else if (jevSessionDate != today && endedToday) {
-            // 전날 시작해 자정을 넘긴 연속 세션을 오늘의 세션으로 이어간다.
-            jevSessionDate = today
         }
-        lastVisitEndedAtEpochMs = null
+        lastOpenedAtEpochMs = nowEpochMs
+        lastLeftAtEpochMs = null
         return shouldReset
     }
 
-    fun markVisitEnded(endedAtEpochMs: Long) {
-        lastVisitEndedAtEpochMs = endedAtEpochMs
+    fun markLeft(leftAtEpochMs: Long) {
+        lastLeftAtEpochMs = leftAtEpochMs
     }
 
     fun mergeVisibleMessages(
         visible: List<MessageRecord>,
         seenAtEpochMs: Long,
-    ) {
-        discardSupersededVisibleSegments(visible)
+    ): MergeResult {
+        val previousRevision = revisionOf(buildTurns(messages))
+        val tailReplacement = truncateReplacedTail(visible)
+        val deletedMiddle = discardMessagesMissingBetweenVisibleAnchors(visible)
+        val replacementStartUserId = tailReplacement?.startUserMessageId
+            ?: deletedMiddle?.startUserMessageId
+        var changed = tailReplacement != null || deletedMiddle != null
+        changed = discardSupersededVisibleSegments(visible) || changed
         val resolved = MutableList<StoredMessage?>(visible.size) { null }
 
         visible.forEachIndexed { index, record ->
             val stored = findExisting(record) ?: return@forEachIndexed
-            stored.record = record
-            stored.lastUpdatedAtEpochMs = seenAtEpochMs
+            if (stored.record != record) {
+                stored.record = record
+                stored.lastUpdatedAtEpochMs = seenAtEpochMs
+                changed = true
+            }
             resolved[index] = stored
         }
 
@@ -88,9 +97,109 @@ internal class ConversationState(
             )
             messages.add(insertAt.coerceIn(0, messages.size), added)
             resolved[index] = added
+            changed = true
         }
 
-        updatedAtEpochMs = maxOf(updatedAtEpochMs, seenAtEpochMs)
+        val currentRevision = revisionOf(buildTurns(messages))
+        if (currentRevision != previousRevision) {
+            updatedAtEpochMs = maxOf(updatedAtEpochMs, seenAtEpochMs)
+        }
+        return MergeResult(
+            changed = changed,
+            replacementStartUserMessageId = replacementStartUserId,
+        )
+    }
+
+    /**
+     * 단순히 화면에서 사라진 메시지는 건드리지 않는다. 다만 기존 응답이 실제로
+     * 수정됐거나, 알려진 과거 응답 뒤에 새 흐름이 나타난 경우에는 그 뒤를 삭제한다.
+     */
+    private fun truncateReplacedTail(visible: List<MessageRecord>): TailReplacement? {
+        if (messages.isEmpty() || visible.isEmpty()) return null
+
+        val storedIds = messages.mapNotNull { it.record.id }.distinct()
+        val storedIdSet = storedIds.toSet()
+        val visibleIds = visible.mapNotNull { it.id }.distinct()
+        val candidateAnchors = mutableListOf<String>()
+
+        visibleIds
+            .filter { it in storedIdSet }
+            .filter { id ->
+                val storedResponse = messages
+                    .asSequence()
+                    .map { it.record }
+                    .filter { it.id == id }
+                    .toList()
+                val visibleResponse = visible.filter { it.id == id }
+                storedResponse != visibleResponse
+            }
+            .forEach(candidateAnchors::add)
+
+        val lastSharedId = visibleIds.lastOrNull { it in storedIdSet }
+        if (lastSharedId != null) {
+            val lastSharedVisibleIndex = visible.indexOfLast { it.id == lastSharedId }
+            val hasNewTail = visible
+                .drop(lastSharedVisibleIndex + 1)
+                .any { it.id == null || it.id !in storedIdSet }
+            if (hasNewTail) candidateAnchors += lastSharedId
+        }
+
+        val anchorId = candidateAnchors
+            .distinct()
+            .minByOrNull { storedIds.indexOf(it) }
+            ?: return null
+        val anchorEnd = messages.indexOfLast { it.record.id == anchorId }
+        if (anchorEnd < 0 || anchorEnd == messages.lastIndex) return null
+
+        messages.subList(anchorEnd + 1, messages.size).clear()
+        return TailReplacement(findReplacementStartUser(anchorId, visible))
+    }
+
+    /** 양쪽의 알려진 ID가 함께 보일 때만 그 사이에서 사라진 메시지를 삭제로 확정한다. */
+    private fun discardMessagesMissingBetweenVisibleAnchors(
+        visible: List<MessageRecord>,
+    ): TailReplacement? {
+        val storedIdSet = messages.mapNotNull { it.record.id }.toSet()
+        val visibleIds = visible.mapNotNull { it.id }.distinct()
+        val visibleIdSet = visibleIds.toSet()
+        val sharedIds = visibleIds.filter { it in storedIdSet }
+        var replacementStartUserId: String? = null
+        var changed = false
+
+        sharedIds.zipWithNext().forEach { (leftId, rightId) ->
+            val leftEnd = messages.indexOfLast { it.record.id == leftId }
+            val rightStart = messages.indexOfFirst { it.record.id == rightId }
+            if (leftEnd < 0 || rightStart <= leftEnd + 1) return@forEach
+
+            val between = messages.subList(leftEnd + 1, rightStart)
+            if (between.none { it.record.id !in visibleIdSet }) return@forEach
+            if (!changed) {
+                replacementStartUserId = findReplacementStartUser(leftId, visible)
+            }
+            between.removeAll { it.record.id !in visibleIdSet }
+            changed = true
+        }
+
+        return if (changed) TailReplacement(replacementStartUserId) else null
+    }
+
+    private fun findReplacementStartUser(
+        anchorId: String,
+        visible: List<MessageRecord>,
+    ): String? {
+        val anchorVisibleIndex = visible.indexOfLast { it.id == anchorId }
+        return visible
+            .drop((anchorVisibleIndex + 1).coerceAtLeast(0))
+            .firstNotNullOfOrNull { message ->
+                message.id?.takeIf { message.role == MessageRole.USER }
+            }
+            ?: visible.firstOrNull { it.id == anchorId && it.role == MessageRole.USER }?.id
+            ?: messages
+                .asSequence()
+                .take(messages.indexOfLast { it.record.id == anchorId } + 1)
+                .map { it.record }
+                .lastOrNull { it.role == MessageRole.USER && it.id != null }
+                ?.id
     }
 
     /**
@@ -98,7 +207,8 @@ internal class ConversationState(
      * 권위 있는 관측값이다. 구간 구성이 바뀌었는데 예전 구간을 남기면 방을
      * 재진입할 때마다 같은 응답이 조금씩 중복되므로, 보이는 ID 내부만 정리한다.
      */
-    private fun discardSupersededVisibleSegments(visible: List<MessageRecord>) {
+    private fun discardSupersededVisibleSegments(visible: List<MessageRecord>): Boolean {
+        var changed = false
         visible
             .asSequence()
             .mapNotNull { it.id }
@@ -109,18 +219,19 @@ internal class ConversationState(
                     .filter { it.id == visibleId }
                     .map { it.segmentIndex }
                     .toSet()
-                messages.removeAll {
+                changed = messages.removeAll {
                     it.record.id == visibleId &&
                         it.record.segmentIndex !in currentSegmentIndexes
-                }
+                } || changed
             }
 
         val pending = visible.filter { it.id == null }
-        if (pending.isEmpty()) return
+        if (pending.isEmpty()) return changed
         val currentPendingKeys = pending.map(::segmentKey).toSet()
-        messages.removeAll {
+        changed = messages.removeAll {
             it.record.id == null && segmentKey(it.record) !in currentPendingKeys
-        }
+        } || changed
+        return changed
     }
 
     private fun segmentKey(message: MessageRecord): String = buildString {
@@ -209,8 +320,6 @@ internal class ConversationState(
             oldText.startsWith(newText)
     }
 
-    private fun localDate(epochMs: Long, zoneId: ZoneId): String =
-        Instant.ofEpochMilli(epochMs).atZone(zoneId).toLocalDate().toString()
 }
 
 internal data class ConversationActivation(
@@ -230,7 +339,7 @@ internal class ConversationRegistry(
 
     private val states = linkedMapOf<String, ConversationState>().apply {
         initialStates
-            .sortedByDescending { it.updatedAtEpochMs }
+            .sortedByDescending { it.lastOpenedAtEpochMs }
             .take(maxConversations)
             .forEach { put(it.conversationId, it) }
     }
@@ -278,7 +387,7 @@ internal class ConversationRegistry(
             .filter { (_, overlap) -> overlap > 0 }
             .maxWithOrNull(
                 compareBy<Pair<ConversationState, Int>> { it.second }
-                    .thenBy { it.first.updatedAtEpochMs },
+                    .thenBy { it.first.lastOpenedAtEpochMs },
             )
             ?.first
 
@@ -298,7 +407,8 @@ internal class ConversationRegistry(
                 .asSequence()
                 .filter { it !== active }
                 .minWithOrNull(
-                    compareBy<ConversationState> { it.updatedAtEpochMs }
+                    compareBy<ConversationState> { it.lastOpenedAtEpochMs }
+                        .thenBy { it.updatedAtEpochMs }
                         .thenBy { it.createdAtEpochMs }
                         .thenBy { it.conversationId },
                 )
