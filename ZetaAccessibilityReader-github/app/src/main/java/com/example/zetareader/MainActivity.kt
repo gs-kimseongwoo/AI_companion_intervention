@@ -169,8 +169,7 @@ class MainActivity : Activity() {
             timingStatus.text = "제타 대화방을 기다리는 중입니다."
         }
 
-        conversation.text = CaptureStore.latestFormatted
-            ?: CaptureStore.readLastFormatted(this)
+        conversation.text = CaptureStore.readLastFormatted(this)
             ?: "접근성 서비스를 켠 다음 제타의 대화 화면으로 이동하세요."
     }
 

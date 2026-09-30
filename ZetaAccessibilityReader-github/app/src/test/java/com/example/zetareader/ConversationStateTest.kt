@@ -120,26 +120,61 @@ class ConversationStateTest {
     }
 
     @Test
-    fun jevContinuesWithinThreeHoursAndResetsAfterThreeHoursAway() {
+    fun jevContinuesWhileContentChangesWithinThreeHours() {
         val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.mergeVisibleMessages(
+            listOf(message("user-1", MessageRole.USER, "첫 질문")),
+            seenAtEpochMs = 1_000L,
+        )
         state.jevStartMessageId = "user-1"
-        state.markLeft(1_000L)
 
-        assertFalse(state.markOpened(1_000L + JEV_INACTIVITY_TIMEOUT_MS - 1L))
+        assertFalse(
+            state.resetJevAfterContentInactivity(
+                1_000L + JEV_INACTIVITY_TIMEOUT_MS - 1L,
+            ),
+        )
         assertEquals("user-1", state.jevStartMessageId)
 
-        state.markLeft(10_000L)
-        assertTrue(state.markOpened(10_000L + JEV_INACTIVITY_TIMEOUT_MS))
+        state.mergeVisibleMessages(
+            listOf(
+                message("user-1", MessageRole.USER, "첫 질문"),
+                message("ai-1", MessageRole.ASSISTANT, "두 시간 뒤 답변"),
+            ),
+            seenAtEpochMs = 1_000L + 2 * 60 * 60 * 1_000L,
+        )
+        assertFalse(
+            state.resetJevAfterContentInactivity(
+                state.updatedAtEpochMs + JEV_INACTIVITY_TIMEOUT_MS - 1L,
+            ),
+        )
+        assertEquals("user-1", state.jevStartMessageId)
+        assertEquals(2, state.evaluationSnapshot("user-1")!!.turns.size)
+
+        assertTrue(
+            state.resetJevAfterContentInactivity(
+                state.updatedAtEpochMs + JEV_INACTIVITY_TIMEOUT_MS,
+            ),
+        )
         assertNull(state.jevStartMessageId)
     }
 
     @Test
-    fun continuousConversationDoesNotResetOnlyBecauseTimePassed() {
+    fun openingReaderDoesNotMoveTheContentInactivityClock() {
         val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.mergeVisibleMessages(
+            listOf(message("user-1", MessageRole.USER, "질문")),
+            seenAtEpochMs = 1_000L,
+        )
         state.jevStartMessageId = "user-1"
+        state.markAccessed(1_000L + JEV_INACTIVITY_TIMEOUT_MS - 1L)
 
-        assertFalse(state.markOpened(100L + JEV_INACTIVITY_TIMEOUT_MS * 2))
-        assertEquals("user-1", state.jevStartMessageId)
+        assertEquals(1_000L, state.updatedAtEpochMs)
+        assertTrue(
+            state.resetJevAfterContentInactivity(
+                1_000L + JEV_INACTIVITY_TIMEOUT_MS,
+            ),
+        )
+        assertNull(state.jevStartMessageId)
     }
 
     @Test
@@ -335,9 +370,8 @@ class ConversationStateTest {
                 ),
                 seenAtEpochMs = 120L,
             )
-            state.markOpened(121L)
+            state.markAccessed(121L)
             state.jevStartMessageId = "user-1"
-            state.markLeft(130L)
             val expected = state.snapshot()
 
             ConversationStatePersistence.save(directory, state)
@@ -349,8 +383,7 @@ class ConversationStateTest {
             assertEquals(expected.turns, actual.turns)
             assertEquals(120L, actual.updatedAtEpochMs)
             assertEquals("user-1", restored.jevStartMessageId)
-            assertEquals(121L, restored.lastOpenedAtEpochMs)
-            assertEquals(130L, restored.lastLeftAtEpochMs)
+            assertEquals(121L, restored.lastAccessedAtEpochMs)
         } finally {
             directory.deleteRecursively()
         }

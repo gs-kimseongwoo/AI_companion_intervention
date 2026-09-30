@@ -32,27 +32,24 @@ internal class ConversationState(
     val messages: MutableList<StoredMessage> = mutableListOf(),
     var updatedAtEpochMs: Long = createdAtEpochMs,
     var jevStartMessageId: String? = null,
-    var lastOpenedAtEpochMs: Long = createdAtEpochMs,
-    var lastLeftAtEpochMs: Long? = null,
+    var lastAccessedAtEpochMs: Long = createdAtEpochMs,
 ) {
-    /** 방을 떠난 지 3시간 이상이면 기존 내용은 새 JEV 기준선으로만 사용한다. */
-    fun markOpened(
+    /** 마지막 실제 내용 변경 뒤 3시간이 지났으면 기존 범위를 JEV 기준선으로 닫는다. */
+    fun resetJevAfterContentInactivity(
         nowEpochMs: Long,
         inactivityTimeoutMs: Long = JEV_INACTIVITY_TIMEOUT_MS,
     ): Boolean {
-        val shouldReset = lastLeftAtEpochMs?.let { leftAt ->
-            (nowEpochMs - leftAt).coerceAtLeast(0L) >= inactivityTimeoutMs
-        } ?: false
-        if (shouldReset) {
-            jevStartMessageId = null
+        if (jevStartMessageId == null) return false
+        if ((nowEpochMs - updatedAtEpochMs).coerceAtLeast(0L) < inactivityTimeoutMs) {
+            return false
         }
-        lastOpenedAtEpochMs = nowEpochMs
-        lastLeftAtEpochMs = null
-        return shouldReset
+        jevStartMessageId = null
+        return true
     }
 
-    fun markLeft(leftAtEpochMs: Long) {
-        lastLeftAtEpochMs = leftAtEpochMs
+    /** 최근 대화방 10개를 고르기 위한 값이며 JEV 시간 판단에는 사용하지 않는다. */
+    fun markAccessed(accessedAtEpochMs: Long) {
+        lastAccessedAtEpochMs = accessedAtEpochMs
     }
 
     fun mergeVisibleMessages(
@@ -339,7 +336,7 @@ internal class ConversationRegistry(
 
     private val states = linkedMapOf<String, ConversationState>().apply {
         initialStates
-            .sortedByDescending { it.lastOpenedAtEpochMs }
+            .sortedByDescending { it.lastAccessedAtEpochMs }
             .take(maxConversations)
             .forEach { put(it.conversationId, it) }
     }
@@ -387,7 +384,7 @@ internal class ConversationRegistry(
             .filter { (_, overlap) -> overlap > 0 }
             .maxWithOrNull(
                 compareBy<Pair<ConversationState, Int>> { it.second }
-                    .thenBy { it.first.lastOpenedAtEpochMs },
+                    .thenBy { it.first.lastAccessedAtEpochMs },
             )
             ?.first
 
@@ -407,7 +404,7 @@ internal class ConversationRegistry(
                 .asSequence()
                 .filter { it !== active }
                 .minWithOrNull(
-                    compareBy<ConversationState> { it.lastOpenedAtEpochMs }
+                    compareBy<ConversationState> { it.lastAccessedAtEpochMs }
                         .thenBy { it.updatedAtEpochMs }
                         .thenBy { it.createdAtEpochMs }
                         .thenBy { it.conversationId },

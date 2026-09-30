@@ -96,7 +96,7 @@ object CaptureStore {
                 pendingConversation = null
                 return false
             }
-            leaveActiveConversation(context, active, now)
+            leaveActiveConversation(context, active)
         }
 
         pendingConversation = null
@@ -112,7 +112,8 @@ object CaptureStore {
                 previousId,
             )
         }
-        val resetAfterInactivity = activation.state.markOpened(now)
+        activation.state.markAccessed(now)
+        val resetAfterInactivity = activation.state.resetJevAfterContentInactivity(now)
 
         val state = ActiveConversation(
             conversation = activation.state,
@@ -145,6 +146,15 @@ object CaptureStore {
     fun publish(context: Context, capture: CaptureResult) {
         if (activeConversation == null) activateConversation(context, capture.messages)
         val state = activeConversation ?: return
+        val resetAfterInactivity = state.conversation.resetJevAfterContentInactivity(
+            capture.capturedAtEpochMs,
+        )
+        if (resetAfterInactivity) {
+            JevEvaluationCoordinator.resetToBaseline(
+                context,
+                state.conversation.conversationId,
+            )
+        }
         val isBaselineCapture = state.baselineCapturePending
         val newUserMessageId = if (isBaselineCapture) {
             null
@@ -200,16 +210,32 @@ object CaptureStore {
     @Synchronized
     fun leaveConversation(context: Context): Boolean {
         val state = activeConversation ?: return false
-        leaveActiveConversation(context, state, System.currentTimeMillis())
+        if (state.conversation.resetJevAfterContentInactivity(System.currentTimeMillis())) {
+            JevEvaluationCoordinator.resetToBaseline(
+                context,
+                state.conversation.conversationId,
+            )
+        }
+        leaveActiveConversation(context, state)
         return true
     }
 
     @Synchronized
-    fun readLastFormatted(context: Context): String? = latestFormatted
-        ?: ensureRegistry(context)
+    fun readLastFormatted(context: Context): String? {
+        val active = activeConversation
+        val conversation = active?.conversation
+            ?: ensureRegistry(context)
             .allStates()
-            .maxByOrNull { it.lastOpenedAtEpochMs }
-            ?.let { formatConversation(it, lastCapture = null) }
+            .maxByOrNull { it.lastAccessedAtEpochMs }
+            ?: return null
+        if (conversation.resetJevAfterContentInactivity(System.currentTimeMillis())) {
+            ConversationStatePersistence.save(conversationsDirectory(context), conversation)
+            JevEvaluationCoordinator.resetToBaseline(context, conversation.conversationId)
+        }
+        return formatConversation(conversation, active?.lastCapture).also {
+            latestFormatted = it
+        }
+    }
 
     private fun save(context: Context, state: ActiveConversation) {
         ConversationStatePersistence.save(
@@ -226,9 +252,7 @@ object CaptureStore {
     private fun leaveActiveConversation(
         context: Context,
         state: ActiveConversation,
-        leftAtEpochMs: Long,
     ) {
-        state.conversation.markLeft(leftAtEpochMs)
         save(context, state)
         if (activeConversation === state) activeConversation = null
         notifyUpdated(context)
@@ -240,7 +264,7 @@ object CaptureStore {
         val directory = conversationsDirectory(context)
         val loaded = ConversationStatePersistence.loadAll(directory)
         val retained = loaded
-            .sortedByDescending { it.lastOpenedAtEpochMs }
+            .sortedByDescending { it.lastAccessedAtEpochMs }
             .take(MAX_CONVERSATIONS)
         val retainedIds = retained.map { it.conversationId }.toSet()
         loaded
@@ -282,10 +306,9 @@ object CaptureStore {
         appendLine("대화방: ${conversation.conversationId}")
         appendLine("리비전: ${snapshot.revision}")
         appendLine("마지막 내용 변경: ${formatDate(conversation.updatedAtEpochMs)}")
-        appendLine("마지막 입장: ${formatDate(conversation.lastOpenedAtEpochMs)}")
         appendLine(
-            conversation.lastLeftAtEpochMs?.let { "마지막 퇴장: ${formatDate(it)}" }
-                ?: "현재 상태: 대화방 열림",
+            "JEV 3시간 기준: " +
+                formatDate(conversation.updatedAtEpochMs + JEV_INACTIVITY_TIMEOUT_MS),
         )
         appendLine("도입부: ${if (scenarioLayout.introduction.isEmpty()) "없음" else "있음"}")
         appendLine("시나리오: ${scenarioLayout.scenarios.size}개")

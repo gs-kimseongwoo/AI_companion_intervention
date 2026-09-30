@@ -14,7 +14,7 @@ import java.security.MessageDigest
 internal object ConversationStatePersistence {
     private const val FILE_SUFFIX = ".conversation"
     private const val MAGIC = 0x5A435331 // ZCS1
-    private const val VERSION = 3
+    private const val VERSION = 4
     private const val MAX_STRING_BYTES = 16 * 1024 * 1024
     private const val MAX_MESSAGES = 100_000
 
@@ -41,8 +41,7 @@ internal object ConversationStatePersistence {
             output.writeLong(state.createdAtEpochMs)
             output.writeLong(state.updatedAtEpochMs)
             output.writeNullableString(state.jevStartMessageId)
-            output.writeLong(state.lastOpenedAtEpochMs)
-            output.writeNullableLong(state.lastLeftAtEpochMs)
+            output.writeLong(state.lastAccessedAtEpochMs)
             output.writeInt(state.messages.size)
             state.messages.forEach { stored ->
                 output.writeNullableString(stored.record.id)
@@ -80,26 +79,35 @@ internal object ConversationStatePersistence {
         val conversationId = input.readString()
         val createdAt = input.readLong()
         val updatedAt = input.readLong()
-        val timing = when (version) {
-            1 -> PersistedTiming(
+        val session = when (version) {
+            1 -> PersistedSession(
                 jevStartMessageId = null,
-                lastOpenedAtEpochMs = updatedAt,
-                lastLeftAtEpochMs = null,
+                lastAccessedAtEpochMs = updatedAt,
             )
             2 -> {
                 input.readNullableString() // 이전 날짜 기준 필드: 더 이상 사용하지 않는다.
                 val jevStartMessageId = input.readNullableString()
                 val lastLeftAtEpochMs = input.readNullableLong()
-                PersistedTiming(
+                PersistedSession(
                     jevStartMessageId = jevStartMessageId,
-                    lastOpenedAtEpochMs = maxOf(updatedAt, lastLeftAtEpochMs ?: updatedAt),
-                    lastLeftAtEpochMs = lastLeftAtEpochMs,
+                    lastAccessedAtEpochMs = maxOf(updatedAt, lastLeftAtEpochMs ?: updatedAt),
                 )
             }
-            else -> PersistedTiming(
+            3 -> {
+                val jevStartMessageId = input.readNullableString()
+                val lastOpenedAtEpochMs = input.readLong()
+                val lastLeftAtEpochMs = input.readNullableLong()
+                PersistedSession(
+                    jevStartMessageId = jevStartMessageId,
+                    lastAccessedAtEpochMs = maxOf(
+                        lastOpenedAtEpochMs,
+                        lastLeftAtEpochMs ?: lastOpenedAtEpochMs,
+                    ),
+                )
+            }
+            else -> PersistedSession(
                 jevStartMessageId = input.readNullableString(),
-                lastOpenedAtEpochMs = input.readLong(),
-                lastLeftAtEpochMs = input.readNullableLong(),
+                lastAccessedAtEpochMs = input.readLong(),
             )
         }
         val count = input.readInt()
@@ -133,16 +141,14 @@ internal object ConversationStatePersistence {
             createdAtEpochMs = createdAt,
             messages = messages,
             updatedAtEpochMs = updatedAt,
-            jevStartMessageId = timing.jevStartMessageId,
-            lastOpenedAtEpochMs = timing.lastOpenedAtEpochMs,
-            lastLeftAtEpochMs = timing.lastLeftAtEpochMs,
+            jevStartMessageId = session.jevStartMessageId,
+            lastAccessedAtEpochMs = session.lastAccessedAtEpochMs,
         )
     }
 
-    private data class PersistedTiming(
+    private data class PersistedSession(
         val jevStartMessageId: String?,
-        val lastOpenedAtEpochMs: Long,
-        val lastLeftAtEpochMs: Long?,
+        val lastAccessedAtEpochMs: Long,
     )
 
     private fun fileFor(directory: File, conversationId: String): File {
@@ -159,11 +165,6 @@ internal object ConversationStatePersistence {
 
     private fun DataInputStream.readNullableString(): String? =
         if (readBoolean()) readString() else null
-
-    private fun DataOutputStream.writeNullableLong(value: Long?) {
-        writeBoolean(value != null)
-        if (value != null) writeLong(value)
-    }
 
     private fun DataInputStream.readNullableLong(): Long? =
         if (readBoolean()) readLong() else null

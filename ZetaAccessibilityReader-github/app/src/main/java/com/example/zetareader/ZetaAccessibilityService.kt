@@ -164,7 +164,7 @@ class ZetaAccessibilityService : AccessibilityService() {
             lastSignature = ""
             detectedUserSpeaker = null
             consecutiveNonDialogueCaptures = 0
-            Log.d(TAG, "제타 대화방 퇴장 시각 저장 완료")
+            Log.d(TAG, "제타 대화방 실시간 감시 종료")
         }
     }
 
