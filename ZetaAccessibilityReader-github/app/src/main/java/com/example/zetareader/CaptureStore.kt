@@ -268,6 +268,11 @@ object CaptureStore {
     ): String = buildString {
         val messages = conversation.messages
         val snapshot = conversation.snapshot()
+        val jevStartTurnIndex = conversation.jevStartMessageId?.let { startId ->
+            snapshot.turns.indexOfFirst {
+                it.messageId == startId && it.role == MessageRole.USER
+            }.takeIf { it >= 0 }
+        }
         val evaluationSnapshot = conversation.jevStartMessageId
             ?.let(conversation::evaluationSnapshot)
         val responses = groupResponses(messages)
@@ -287,10 +292,12 @@ object CaptureStore {
         appendLine("응답: ${responses.size}개 · 세부 구간: ${messages.size}개")
         appendLine("전체 현재 턴: ${snapshot.turns.size}개")
         appendLine(
-            if (evaluationSnapshot == null) {
-                "JEV 범위: 기준선 등록 완료 · 새 USER RESPONSE 대기 · 기존 내용 미전송"
+            if (jevStartTurnIndex == null || evaluationSnapshot == null) {
+                "JEV 기준선: 현재 ${snapshot.turns.size}턴 전체 미전송 · " +
+                    "새 USER RESPONSE 대기"
             } else {
-                "JEV 범위: 새 USER RESPONSE부터 ${evaluationSnapshot.turns.size}턴 · " +
+                "JEV 기준선: 앞 ${jevStartTurnIndex}턴 미전송 · " +
+                    "이후 ${evaluationSnapshot.turns.size}턴 분석 · " +
                     if (evaluationSnapshot.isReadyForEvaluation) "분석 준비" else "AI 응답 대기"
             },
         )
@@ -307,11 +314,39 @@ object CaptureStore {
             appendLine()
         }
 
+        var boundaryPrinted = false
         scenarioLayout.scenarios.forEachIndexed { index, scenario ->
+            if (
+                !boundaryPrinted &&
+                conversation.jevStartMessageId != null &&
+                scenario.userResponses.any {
+                    it.messageId == conversation.jevStartMessageId
+                }
+            ) {
+                appendJevBoundary(waitingForUser = false)
+                boundaryPrinted = true
+            }
             appendLine("===== SCENARIO ${index + 1} =====")
             appendScenarioSections(scenario, userFirst = true)
             appendLine()
         }
+
+        if (!boundaryPrinted) {
+            appendJevBoundary(waitingForUser = true)
+        }
+    }
+
+    private fun StringBuilder.appendJevBoundary(waitingForUser: Boolean) {
+        appendLine("========== JEV 기준선 ==========")
+        appendLine("↑ 여기까지 기존 내용 · JEV 미전송")
+        appendLine(
+            if (waitingForUser) {
+                "↓ 다음 USER RESPONSE부터 새 분석"
+            } else {
+                "↓ 여기부터 새 USER RESPONSE 분석"
+            },
+        )
+        appendLine()
     }
 
     /** 같은 ID의 원본 구간들을 하나의 AI/USER 응답으로 만든다. */
