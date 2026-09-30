@@ -47,6 +47,21 @@ object JevEvaluationCoordinator {
     var latest: JevEvaluationState = JevEvaluationState()
         private set
 
+    /** 입장 당시 기존 대화는 기준선으로만 등록하고 JEV 요청을 취소한다. */
+    fun resetToBaseline(context: Context, conversationId: String) {
+        val appContext = context.applicationContext
+        synchronized(lock) {
+            activeKey = null
+            pending?.cancel(false)
+            pending = null
+            latest = JevEvaluationState(
+                phase = JevEvaluationPhase.BASELINE,
+                conversationId = conversationId,
+            )
+        }
+        notifyUpdated(appContext)
+    }
+
     fun submit(context: Context, snapshot: ConversationSnapshot) {
         val appContext = context.applicationContext
         val endpoint = BuildConfig.JEV_ENDPOINT

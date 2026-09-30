@@ -1,6 +1,8 @@
 package com.example.zetareader
 
 import java.security.MessageDigest
+import java.time.Instant
+import java.time.ZoneId
 
 internal data class StoredMessage(
     var record: MessageRecord,
@@ -19,7 +21,40 @@ internal class ConversationState(
     val createdAtEpochMs: Long,
     val messages: MutableList<StoredMessage> = mutableListOf(),
     var updatedAtEpochMs: Long = createdAtEpochMs,
+    var jevSessionDate: String? = null,
+    var jevStartMessageId: String? = null,
+    var lastVisitEndedAtEpochMs: Long? = null,
 ) {
+    /**
+     * 같은 날짜에는 방을 오가도 JEV 시작점을 유지한다. 전날 방문이 자정을 넘어
+     * 오늘 끝난 경우도 연속 사용으로 보고 유지하며, 그 밖의 새 날짜 입장은 초기화한다.
+     */
+    fun prepareJevSession(
+        nowEpochMs: Long,
+        zoneId: ZoneId = ZoneId.systemDefault(),
+    ): Boolean {
+        val today = localDate(nowEpochMs, zoneId)
+        val endedToday = lastVisitEndedAtEpochMs
+            ?.let { localDate(it, zoneId) == today }
+            ?: false
+        val shouldReset = jevSessionDate == null ||
+            (jevSessionDate != today && !endedToday)
+
+        if (shouldReset) {
+            jevSessionDate = today
+            jevStartMessageId = null
+        } else if (jevSessionDate != today && endedToday) {
+            // 전날 시작해 자정을 넘긴 연속 세션을 오늘의 세션으로 이어간다.
+            jevSessionDate = today
+        }
+        lastVisitEndedAtEpochMs = null
+        return shouldReset
+    }
+
+    fun markVisitEnded(endedAtEpochMs: Long) {
+        lastVisitEndedAtEpochMs = endedAtEpochMs
+    }
+
     fun mergeVisibleMessages(
         visible: List<MessageRecord>,
         seenAtEpochMs: Long,
@@ -117,6 +152,22 @@ internal class ConversationState(
         )
     }
 
+    /** 입장 뒤 새로 생긴 USER RESPONSE부터의 턴만 JEV 전송용으로 만든다. */
+    fun evaluationSnapshot(startMessageId: String): ConversationSnapshot? {
+        val allTurns = buildTurns(messages)
+        val startIndex = allTurns.indexOfFirst {
+            it.messageId == startMessageId && it.role == MessageRole.USER
+        }
+        if (startIndex < 0) return null
+        val evaluationTurns = allTurns.drop(startIndex)
+        return ConversationSnapshot(
+            conversationId = conversationId,
+            revision = revisionOf(evaluationTurns),
+            updatedAtEpochMs = updatedAtEpochMs,
+            turns = evaluationTurns,
+        )
+    }
+
     private fun findExisting(incoming: MessageRecord): StoredMessage? {
         incoming.id?.let { id ->
             messages.firstOrNull {
@@ -157,20 +208,31 @@ internal class ConversationState(
             newText.startsWith(oldText) ||
             oldText.startsWith(newText)
     }
+
+    private fun localDate(epochMs: Long, zoneId: ZoneId): String =
+        Instant.ofEpochMilli(epochMs).atZone(zoneId).toLocalDate().toString()
 }
 
 internal data class ConversationActivation(
     val state: ConversationState,
-    /** 임시 키를 방 UUID로 승격했을 때 제거할 예전 저장 키. */
-    val replacedConversationId: String? = null,
+    /** 임시 키 승격 또는 10개 제한으로 제거할 저장 키. */
+    val removedConversationIds: List<String> = emptyList(),
 )
 
 /** 대화방 선택 ID와 기존 메시지 ID의 교집합을 이용해 상태를 분리·복원한다. */
 internal class ConversationRegistry(
     initialStates: Collection<ConversationState> = emptyList(),
+    private val maxConversations: Int = 10,
 ) {
+    init {
+        require(maxConversations > 0)
+    }
+
     private val states = linkedMapOf<String, ConversationState>().apply {
-        initialStates.forEach { put(it.conversationId, it) }
+        initialStates
+            .sortedByDescending { it.updatedAtEpochMs }
+            .take(maxConversations)
+            .forEach { put(it.conversationId, it) }
     }
 
     fun activate(
@@ -182,7 +244,7 @@ internal class ConversationRegistry(
 
         if (preferredConversationId != null) {
             states[preferredConversationId]?.let {
-                return ConversationActivation(it)
+                return completeActivation(it)
             }
 
             if (matching != null) {
@@ -190,24 +252,22 @@ internal class ConversationRegistry(
                 states.remove(previousId)
                 matching.conversationId = preferredConversationId
                 states[preferredConversationId] = matching
-                return ConversationActivation(
-                    state = matching,
-                    replacedConversationId = previousId,
+                return completeActivation(
+                    matching,
+                    initiallyRemoved = listOf(previousId),
                 )
             }
 
-            return ConversationActivation(
-                state = createState(preferredConversationId, nowEpochMs),
-            )
+            return completeActivation(createState(preferredConversationId, nowEpochMs))
         }
 
-        matching?.let { return ConversationActivation(it) }
+        matching?.let { return completeActivation(it) }
 
         val firstStableMessageId = visible.firstNotNullOfOrNull { it.id }
         val fallbackId = firstStableMessageId
             ?.let { "messages:$it" }
             ?: "visit:$nowEpochMs"
-        return ConversationActivation(createState(fallbackId, nowEpochMs))
+        return completeActivation(createState(fallbackId, nowEpochMs))
     }
 
     fun allStates(): Collection<ConversationState> = states.values
@@ -227,6 +287,30 @@ internal class ConversationRegistry(
             conversationId = id,
             createdAtEpochMs = nowEpochMs,
         ).also { states[id] = it }
+
+    private fun completeActivation(
+        active: ConversationState,
+        initiallyRemoved: List<String> = emptyList(),
+    ): ConversationActivation {
+        val removed = initiallyRemoved.toMutableList()
+        while (states.size > maxConversations) {
+            val oldest = states.values
+                .asSequence()
+                .filter { it !== active }
+                .minWithOrNull(
+                    compareBy<ConversationState> { it.updatedAtEpochMs }
+                        .thenBy { it.createdAtEpochMs }
+                        .thenBy { it.conversationId },
+                )
+                ?: break
+            states.remove(oldest.conversationId)
+            removed += oldest.conversationId
+        }
+        return ConversationActivation(
+            state = active,
+            removedConversationIds = removed.distinct(),
+        )
+    }
 }
 
 private data class TurnGroup(

@@ -191,8 +191,10 @@ adb reverse tcp:8765 tcp:8765
 ```
 
 Then install the Reader debug APK and open a Zeta conversation. After the
-latest assistant response is stable for two seconds, the Reader sends the full
-current snapshot to `POST /evaluate`. The response echoes `conversation_id` and
+latest assistant response is stable for two seconds, the Reader sends only the
+turns beginning with the first new user response observed after room entry to
+`POST /evaluate`. Messages already present at entry form a local baseline and
+are not sent. The response echoes `conversation_id` and
 `revision`; Android discards it if the conversation changed while evaluation
 was in flight. Scores are shown only as observation values and do not trigger
 an intervention or close Zeta.

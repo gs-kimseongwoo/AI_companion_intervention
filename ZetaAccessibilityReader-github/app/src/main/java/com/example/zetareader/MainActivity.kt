@@ -150,6 +150,7 @@ class MainActivity : Activity() {
                     "턴 ${it.turns.size}개 · ${if (it.isReadyForEvaluation) "분석 준비" else "갱신 대기"}"
             }.orEmpty()
             val jevState = when (jev.phase) {
+                JevEvaluationPhase.BASELINE -> "JEV: 새 USER RESPONSE 대기 · 기존 내용 미전송"
                 JevEvaluationPhase.IDLE -> "JEV: 대화 완성 대기"
                 JevEvaluationPhase.WAITING -> "JEV: 내용 안정화 대기"
                 JevEvaluationPhase.RUNNING -> "JEV: 분석 중"

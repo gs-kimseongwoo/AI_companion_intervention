@@ -79,6 +79,7 @@ data class ConversationSnapshot(
 }
 
 enum class JevEvaluationPhase {
+    BASELINE,
     IDLE,
     WAITING,
     RUNNING,

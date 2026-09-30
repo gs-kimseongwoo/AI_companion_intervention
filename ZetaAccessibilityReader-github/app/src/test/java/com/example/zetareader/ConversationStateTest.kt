@@ -1,9 +1,12 @@
 package com.example.zetareader
 
 import java.nio.file.Files
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -80,6 +83,63 @@ class ConversationStateTest {
     }
 
     @Test
+    fun evaluationSnapshotExcludesEverythingBeforeNewUserResponse() {
+        val state = ConversationState("room:a", createdAtEpochMs = 100L)
+        state.mergeVisibleMessages(
+            listOf(
+                message("old-user", MessageRole.USER, "어제 질문"),
+                message("old-ai", MessageRole.ASSISTANT, "어제 답변"),
+                message("new-user", MessageRole.USER, "오늘 질문"),
+                message(null, MessageRole.ASSISTANT, "오늘 답변"),
+            ),
+            seenAtEpochMs = 120L,
+        )
+
+        val snapshot = state.evaluationSnapshot("new-user")!!
+
+        assertEquals(2, snapshot.turns.size)
+        assertEquals("오늘 질문", snapshot.turns.first().text.substringAfter("]\n"))
+        assertTrue(snapshot.turns.last().text.contains("오늘 답변"))
+        assertFalse(snapshot.turns.any { it.text.contains("어제") })
+        assertTrue(snapshot.isReadyForEvaluation)
+        assertNull(state.evaluationSnapshot("missing-user"))
+    }
+
+    @Test
+    fun onlyNewStableUserIdStartsJevSession() {
+        val visible = listOf(
+            message("old-user", MessageRole.USER, "기존 질문"),
+            message("old-ai", MessageRole.ASSISTANT, "기존 답변"),
+            message("new-user", MessageRole.USER, "새 질문"),
+        )
+
+        assertEquals(
+            "new-user",
+            firstNewUserMessageId(visible, setOf("old-user", "old-ai")),
+        )
+        assertNull(firstNewUserMessageId(visible, visible.mapNotNull { it.id }.toSet()))
+    }
+
+    @Test
+    fun jevSessionContinuesAcrossMidnightButResetsOnLaterNewDate() {
+        val zone = ZoneId.of("Asia/Seoul")
+        val state = ConversationState("room:a", createdAtEpochMs = epoch(2026, 9, 29, 23, zone))
+
+        assertTrue(state.prepareJevSession(epoch(2026, 9, 29, 23, zone), zone))
+        state.jevStartMessageId = "user-night"
+        state.markVisitEnded(epoch(2026, 9, 30, 1, zone))
+
+        assertFalse(state.prepareJevSession(epoch(2026, 9, 30, 2, zone), zone))
+        assertEquals("user-night", state.jevStartMessageId)
+        assertEquals("2026-09-30", state.jevSessionDate)
+
+        state.markVisitEnded(epoch(2026, 9, 30, 3, zone))
+        assertTrue(state.prepareJevSession(epoch(2026, 10, 1, 9, zone), zone))
+        assertNull(state.jevStartMessageId)
+        assertEquals("2026-10-01", state.jevSessionDate)
+    }
+
+    @Test
     fun revisitingVisibleMessageDropsSegmentsThatNoLongerExist() {
         val state = ConversationState("room:a", createdAtEpochMs = 100L)
         state.mergeVisibleMessages(
@@ -135,7 +195,27 @@ class ConversationStateTest {
         val promoted = registry.activate("room:stable", visible, nowEpochMs = 130L)
         assertSame(fallback, promoted.state)
         assertEquals("room:stable", promoted.state.conversationId)
-        assertEquals("messages:shared-message", promoted.replacedConversationId)
+        assertTrue("messages:shared-message" in promoted.removedConversationIds)
+    }
+
+    @Test
+    fun registryKeepsOnlyTenMostRecentRooms() {
+        val registry = ConversationRegistry(maxConversations = 10)
+        var lastActivation: ConversationActivation? = null
+        repeat(11) { index ->
+            val visible = listOf(message("user-$index", MessageRole.USER, "질문 $index"))
+            val activation = registry.activate(
+                preferredConversationId = "room:$index",
+                visible = visible,
+                nowEpochMs = 100L + index,
+            )
+            activation.state.mergeVisibleMessages(visible, 100L + index)
+            lastActivation = activation
+        }
+
+        assertEquals(10, registry.allStates().size)
+        assertFalse(registry.allStates().any { it.conversationId == "room:0" })
+        assertTrue("room:0" in lastActivation!!.removedConversationIds)
     }
 
     @Test
@@ -150,6 +230,9 @@ class ConversationStateTest {
                 ),
                 seenAtEpochMs = 120L,
             )
+            state.prepareJevSession(121L, ZoneId.of("UTC"))
+            state.jevStartMessageId = "user-1"
+            state.markVisitEnded(130L)
             val expected = state.snapshot()
 
             ConversationStatePersistence.save(directory, state)
@@ -160,6 +243,9 @@ class ConversationStateTest {
             assertEquals(expected.revision, actual.revision)
             assertEquals(expected.turns, actual.turns)
             assertEquals(120L, actual.updatedAtEpochMs)
+            assertEquals(state.jevSessionDate, restored.jevSessionDate)
+            assertEquals("user-1", restored.jevStartMessageId)
+            assertEquals(130L, restored.lastVisitEndedAtEpochMs)
         } finally {
             directory.deleteRecursively()
         }
@@ -177,4 +263,14 @@ class ConversationStateTest {
         text = text,
         segmentIndex = segmentIndex,
     )
+
+    private fun epoch(
+        year: Int,
+        month: Int,
+        day: Int,
+        hour: Int,
+        zone: ZoneId,
+    ): Long = ZonedDateTime.of(year, month, day, hour, 0, 0, 0, zone)
+        .toInstant()
+        .toEpochMilli()
 }

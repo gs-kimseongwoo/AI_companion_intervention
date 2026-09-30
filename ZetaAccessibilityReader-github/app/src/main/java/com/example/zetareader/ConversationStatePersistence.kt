@@ -14,7 +14,7 @@ import java.security.MessageDigest
 internal object ConversationStatePersistence {
     private const val FILE_SUFFIX = ".conversation"
     private const val MAGIC = 0x5A435331 // ZCS1
-    private const val VERSION = 1
+    private const val VERSION = 2
     private const val MAX_STRING_BYTES = 16 * 1024 * 1024
     private const val MAX_MESSAGES = 100_000
 
@@ -40,6 +40,9 @@ internal object ConversationStatePersistence {
             output.writeString(state.conversationId)
             output.writeLong(state.createdAtEpochMs)
             output.writeLong(state.updatedAtEpochMs)
+            output.writeNullableString(state.jevSessionDate)
+            output.writeNullableString(state.jevStartMessageId)
+            output.writeNullableLong(state.lastVisitEndedAtEpochMs)
             output.writeInt(state.messages.size)
             state.messages.forEach { stored ->
                 output.writeNullableString(stored.record.id)
@@ -72,10 +75,14 @@ internal object ConversationStatePersistence {
         BufferedInputStream(FileInputStream(file)),
     ).use { input ->
         check(input.readInt() == MAGIC) { "알 수 없는 대화 상태 파일입니다." }
-        check(input.readInt() == VERSION) { "지원하지 않는 대화 상태 버전입니다." }
+        val version = input.readInt()
+        check(version in 1..VERSION) { "지원하지 않는 대화 상태 버전입니다." }
         val conversationId = input.readString()
         val createdAt = input.readLong()
         val updatedAt = input.readLong()
+        val jevSessionDate = if (version >= 2) input.readNullableString() else null
+        val jevStartMessageId = if (version >= 2) input.readNullableString() else null
+        val lastVisitEndedAt = if (version >= 2) input.readNullableLong() else null
         val count = input.readInt()
         check(count in 0..MAX_MESSAGES) { "메시지 개수가 올바르지 않습니다: $count" }
 
@@ -107,6 +114,9 @@ internal object ConversationStatePersistence {
             createdAtEpochMs = createdAt,
             messages = messages,
             updatedAtEpochMs = updatedAt,
+            jevSessionDate = jevSessionDate,
+            jevStartMessageId = jevStartMessageId,
+            lastVisitEndedAtEpochMs = lastVisitEndedAt,
         )
     }
 
@@ -124,6 +134,14 @@ internal object ConversationStatePersistence {
 
     private fun DataInputStream.readNullableString(): String? =
         if (readBoolean()) readString() else null
+
+    private fun DataOutputStream.writeNullableLong(value: Long?) {
+        writeBoolean(value != null)
+        if (value != null) writeLong(value)
+    }
+
+    private fun DataInputStream.readNullableLong(): Long? =
+        if (readBoolean()) readLong() else null
 
     private fun DataOutputStream.writeString(value: String) {
         val bytes = value.toByteArray(Charsets.UTF_8)

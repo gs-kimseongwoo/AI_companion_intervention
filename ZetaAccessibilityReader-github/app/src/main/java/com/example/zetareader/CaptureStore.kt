@@ -17,6 +17,7 @@ object CaptureStore {
     private const val LATEST_FILE = "latest_capture.txt"
     private const val SESSIONS_DIRECTORY = "sessions"
     private const val CONVERSATIONS_DIRECTORY = "conversations"
+    private const val MAX_CONVERSATIONS = 10
     private const val ROOM_PREFIX = "room:"
     private const val ROOM_SELECTION_TTL_MS = 15_000L
 
@@ -24,6 +25,8 @@ object CaptureStore {
         val startedAtEpochMs: Long,
         val file: File,
         val conversation: ConversationState,
+        val observedMessageIds: MutableSet<String>,
+        var baselineCapturePending: Boolean = true,
         var lastCapture: CaptureResult? = null,
         var endedAtEpochMs: Long? = null,
     )
@@ -108,12 +111,13 @@ object CaptureStore {
             visible = visibleMessages,
             nowEpochMs = now,
         )
-        activation.replacedConversationId?.let { previousId ->
+        activation.removedConversationIds.forEach { previousId ->
             ConversationStatePersistence.delete(
                 conversationsDirectory(context),
                 previousId,
             )
         }
+        activation.state.prepareJevSession(now)
 
         val directory = File(context.filesDir, SESSIONS_DIRECTORY).apply { mkdirs() }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.KOREA)
@@ -122,11 +126,18 @@ object CaptureStore {
             startedAtEpochMs = now,
             file = File(directory, "zeta_session_${stamp}.txt"),
             conversation = activation.state,
+            observedMessageIds = buildSet {
+                addAll(activation.state.messages.mapNotNull { it.record.id })
+                addAll(visibleMessages.mapNotNull { it.id })
+            }.toMutableSet(),
         )
         activeSession = state
         latest = null
         latestSnapshot = activation.state.snapshot()
-        JevEvaluationCoordinator.submit(context, latestSnapshot!!)
+        JevEvaluationCoordinator.resetToBaseline(
+            context,
+            activation.state.conversationId,
+        )
         save(context, state)
         notifyUpdated(context)
         return true
@@ -136,18 +147,31 @@ object CaptureStore {
     fun publish(context: Context, capture: CaptureResult) {
         if (activeSession == null) beginSession(context, capture.messages)
         val state = activeSession ?: return
+        val isBaselineCapture = state.baselineCapturePending
+        if (!isBaselineCapture && state.conversation.jevStartMessageId == null) {
+            state.conversation.jevStartMessageId = firstNewUserMessageId(
+                visible = capture.messages,
+                observedMessageIds = state.observedMessageIds,
+            )
+        }
 
         state.conversation.mergeVisibleMessages(
             capture.messages,
             capture.capturedAtEpochMs,
         )
+        state.observedMessageIds += capture.messages.mapNotNull { it.id }
+        state.baselineCapturePending = false
         val cumulativeCapture = capture.copy(
             messages = state.conversation.messageRecords(),
         )
         state.lastCapture = cumulativeCapture
         latest = cumulativeCapture
         latestSnapshot = state.conversation.snapshot()
-        JevEvaluationCoordinator.submit(context, latestSnapshot!!)
+        if (!isBaselineCapture) {
+            state.conversation.jevStartMessageId
+                ?.let(state.conversation::evaluationSnapshot)
+                ?.let { JevEvaluationCoordinator.submit(context, it) }
+        }
         save(context, state)
         notifyUpdated(context)
     }
@@ -181,7 +205,9 @@ object CaptureStore {
     }
 
     private fun finishActiveSession(context: Context, state: SessionState) {
-        state.endedAtEpochMs = System.currentTimeMillis()
+        val endedAt = System.currentTimeMillis()
+        state.endedAtEpochMs = endedAt
+        state.conversation.markVisitEnded(endedAt)
         save(context, state)
         if (activeSession === state) activeSession = null
         notifyUpdated(context)
@@ -189,8 +215,18 @@ object CaptureStore {
 
     private fun ensureRegistry(context: Context): ConversationRegistry {
         registry?.let { return it }
+        val directory = conversationsDirectory(context)
+        val loaded = ConversationStatePersistence.loadAll(directory)
+        val retained = loaded
+            .sortedByDescending { it.updatedAtEpochMs }
+            .take(MAX_CONVERSATIONS)
+        val retainedIds = retained.map { it.conversationId }.toSet()
+        loaded
+            .filter { it.conversationId !in retainedIds }
+            .forEach { ConversationStatePersistence.delete(directory, it.conversationId) }
         return ConversationRegistry(
-            ConversationStatePersistence.loadAll(conversationsDirectory(context)),
+            initialStates = retained,
+            maxConversations = MAX_CONVERSATIONS,
         ).also { registry = it }
     }
 
@@ -200,6 +236,8 @@ object CaptureStore {
     private fun formatSession(state: SessionState): String = buildString {
         val messages = state.conversation.messages
         val snapshot = state.conversation.snapshot()
+        val evaluationSnapshot = state.conversation.jevStartMessageId
+            ?.let(state.conversation::evaluationSnapshot)
         val responses = groupResponses(messages)
         val scenarioLayout = groupScenarios(responses)
 
@@ -213,9 +251,14 @@ object CaptureStore {
         appendLine("도입부: ${if (scenarioLayout.introduction.isEmpty()) "없음" else "있음"}")
         appendLine("시나리오: ${scenarioLayout.scenarios.size}개")
         appendLine("응답: ${responses.size}개 · 세부 구간: ${messages.size}개")
+        appendLine("전체 현재 턴: ${snapshot.turns.size}개")
         appendLine(
-            "분석 준비: ${if (snapshot.isReadyForEvaluation) "완료" else "대기"} · " +
-                "턴 ${snapshot.turns.size}개",
+            if (evaluationSnapshot == null) {
+                "JEV 범위: 기준선 등록 완료 · 새 USER RESPONSE 대기 · 기존 내용 미전송"
+            } else {
+                "JEV 범위: 새 USER RESPONSE부터 ${evaluationSnapshot.turns.size}턴 · " +
+                    if (evaluationSnapshot.isReadyForEvaluation) "분석 준비" else "AI 응답 대기"
+            },
         )
         state.lastCapture?.let { capture ->
             appendLine("최근 갱신: ${formatDate(capture.capturedAtEpochMs)}")
@@ -348,5 +391,15 @@ internal fun scenarioIndexesForRoles(roles: List<MessageRole>): List<Int?> {
     return roles.map { role ->
         if (role == MessageRole.USER) scenarioIndex += 1
         scenarioIndex.takeIf { it >= 0 }
+    }
+}
+
+/** 캐릭터 이름이 아니라 새 정식 USER 메시지 ID만 JEV 시작 기준으로 사용한다. */
+internal fun firstNewUserMessageId(
+    visible: List<MessageRecord>,
+    observedMessageIds: Set<String>,
+): String? = visible.firstNotNullOfOrNull { message ->
+    message.id?.takeIf {
+        message.role == MessageRole.USER && it !in observedMessageIds
     }
 }
