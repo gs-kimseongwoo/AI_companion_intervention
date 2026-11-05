@@ -1,0 +1,58 @@
+{
+  "event_boundary": {
+    "type": "noul",
+    "instructions": "You are analyzing the narrative structure of an ongoing AI role-play conversation.\n\nEvaluate whether the latest AI-character turn marks a meaningful narrative event boundary, where one meaningful event transitions into another.\n\nConsider continuity and changes in the following six situational dimensions:\n\n1. TIME: Changes in when events take place.\n2. SPACE: Changes in location or setting.\n3. CHARACTERS: Changes in participating or central characters.\n4. CAUSALITY: Changes in the causal relationships between events.\n5. OBJECT INTERACTIONS: Meaningful changes in interactions with important objects.\n6. GOALS: Changes in characters' goals or intentions.\n\nUse these dimensions as supporting cues to determine whether a meaningful event transition has occurred in the ongoing narrative.",
+    "criteria": {
+      "true": "A meaningful narrative event boundary has occurred.",
+      "false": "The same meaningful narrative event continues."
+    }
+  },
+  "time_change": {
+    "type": "noul",
+    "instructions": "Determine whether a meaningful change in when events take place has occurred in the latest AI-character turn.",
+    "criteria": {
+      "true": "A meaningful temporal change has occurred.",
+      "false": "No meaningful temporal change has occurred."
+    }
+  },
+  "space_change": {
+    "type": "noul",
+    "instructions": "Determine whether a meaningful change in location or setting has occurred in the latest AI-character turn.",
+    "criteria": {
+      "true": "A meaningful spatial change has occurred.",
+      "false": "No meaningful spatial change has occurred."
+    }
+  },
+  "characters_change": {
+    "type": "noul",
+    "instructions": "Determine whether the participating or central characters have meaningfully changed in the latest AI-character turn.",
+    "criteria": {
+      "true": "A meaningful change in participating or central characters has occurred.",
+      "false": "No meaningful change in participating or central characters has occurred."
+    }
+  },
+  "causality_change": {
+    "type": "noul",
+    "instructions": "Determine whether a meaningful change in the causal relationships between events has occurred in the latest AI-character turn.",
+    "criteria": {
+      "true": "A meaningful change in causal relationships has occurred.",
+      "false": "No meaningful change in causal relationships has occurred."
+    }
+  },
+  "object_interactions_change": {
+    "type": "noul",
+    "instructions": "Determine whether a meaningful change in interactions with important objects has occurred in the latest AI-character turn.",
+    "criteria": {
+      "true": "A meaningful change in object interactions has occurred.",
+      "false": "No meaningful change in object interactions has occurred."
+    }
+  },
+  "goals_change": {
+    "type": "noul",
+    "instructions": "Determine whether a meaningful change in characters' goals or intentions has occurred in the latest AI-character turn.",
+    "criteria": {
+      "true": "A meaningful change in goals or intentions has occurred.",
+      "false": "No meaningful change in goals or intentions has occurred."
+    }
+  }
+}

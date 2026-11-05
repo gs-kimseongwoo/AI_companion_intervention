@@ -3,10 +3,7 @@
 __pycache__/
 .pytest_cache/
 *.egg-info/
-data/*.jsonl
-data/*.json
-data/*.sqlite3
-data/*.sqlite3-*
+data/
 outputs/
 web/public/jev-results.json
 web/public/qwen-results.json
