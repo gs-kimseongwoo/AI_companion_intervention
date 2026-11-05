@@ -3,15 +3,15 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jev-pippa-explorer"
+name = "jev-event-boundary-pipeline"
 version = "0.1.0"
-description = "Exploratory expanding-window analysis of PIPPA conversations with Jev"
+description = "Event-boundary analysis of Zeta role-play conversations with Jev"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
-jev-pippa = "jev_pippa.cli:main"
+jev-pipeline = "jev_pippa.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

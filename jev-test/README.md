@@ -1,214 +1,155 @@
-# Jev × PIPPA conversation-state explorer
+# Jev event-boundary pipeline
 
-An end-to-end exploratory prototype for asking whether Jev's turn-by-turn score
-trajectories expose human-interpretable transitions in AI-companion conversations.
-It is deliberately **not** a benchmark, a ground-truth labeling pipeline, or an
-intervention system.
+Zeta 역할극 대화를 정제하고, Jev로 평가한 뒤, 읽기 쉬운 report를 만드는 최소 파이프라인입니다.
 
-The implementation follows the current TypeSafe HTTP API directly:
+## 구조
 
-- `POST https://api.typesafe.ai/v1/systemone`
-- model alias `jev-latest` (the exact returned version is stored per row)
-- one structured `state` and three parallel `noul` questions per request
-- exponential backoff for `429`, `529`, and transient server errors
+```text
+원본 dataset.json
+  → refine
+  → dataset.refined.json
+  → evaluate + prompts/event_boundary.json
+  → evaluations.jsonl
+  → report
+  → report.csv + report.md
+```
 
-Official references: [API](https://docs.typesafe.ai/api),
-[State](https://docs.typesafe.ai/concepts/state),
-[Primitives](https://docs.typesafe.ai/primitives), and
-[Models](https://docs.typesafe.ai/models).
+각 파일의 책임을 분리했습니다.
 
-## What is evaluated
+- `refine_dataset.py`: 입력 JSON 검증과 표준 dataset 생성
+- `pipeline.py`: 누적 대화 state 생성, Jev 실행, 중복 실행 방지
+- `event_boundary.py`: Prompt 검증과 Jev 점수 해석
+- `report.py`: 평가 결과를 CSV와 Markdown으로 변환
+- `cli.py`: 위 단계를 명령어로 연결
 
-For every utterance index from `start_turn` through the end, the complete prefix
-is sent as structured JSON. PIPPA's `conversation` entries are treated as turns
-(individual utterances), with `is_human=true` mapped to `human` and false mapped
-to `assistant`.
+Stage 2와 최종 pause 판정은 포함하지 않습니다.
 
-The editable questions live in [`config/questions.json`](config/questions.json):
+## 1. 입력 dataset
 
-- `context_shift`
-- `natural_breakpoint`
-- `engagement_drop`
+파이프라인은 아래 형식의 JSON이 들어온다고 가정합니다.
 
-Each result is a `noul` value: the model's probability of “yes,” from 0 to 1.
-It is a model signal, not a calibrated construct measurement or a human label.
+```json
+{
+  "preamble": [
+    {
+      "speaker": "assistant",
+      "text": "[배경]\n비가 내린다."
+    }
+  ],
+  "turn_count": 2,
+  "turns": [
+    {
+      "turn": 1,
+      "user_response": "누구야?",
+      "ai_response": "[엘레노어]\n\"나야.\""
+    },
+    {
+      "turn": 2,
+      "user_response": "잠깐.",
+      "ai_response": ""
+    }
+  ]
+}
+```
 
-## Setup
+`preamble` 대신 하나의 `intro` 문자열을 사용할 수도 있습니다.
+
+AI 응답은 이미 원하는 표현으로 만들어졌다고 가정합니다.
+
+- 서술: `[배경]` 또는 `[엘레노어]` 아래 일반 본문
+- 대사: 따옴표로 감싼 본문
+- 같은 화자의 연속 블록: refine 단계에서 하나로 결합
+- 화자 추측, narration/dialogue 자동 분류: 하지 않음
+
+## 2. 설치
 
 ```bash
-cd 03_codes/test/jev-test
 python3 -m venv .venv
 .venv/bin/pip install -e .
+export TYPESAFE_API_KEY="..."
 ```
 
-PIPPA contains NSFW and potentially disturbing material. The sample and reports
-therefore remain git-ignored by default.
+## 3. 단계별 실행
 
-## 1. Prepare a deterministic sample
+### Refine
 
 ```bash
-.venv/bin/jev-pippa prepare
+.venv/bin/jev-pipeline refine \
+  --input /absolute/path/to/dataset.json \
+  --output data/run/dataset.refined.json
 ```
 
-Defaults select 20 conversations from the official
-`PygmalionAI/PIPPA` `pippa_deduped.jsonl`, using the 20 smallest stable seeded
-hashes among conversations with 8–50 utterances and at most 80,000 text
-characters. The entire remote JSONL is streamed once, but only the 20 selected
-records are retained. No `datasets` SDK or full local dataset copy is required.
+표준 dataset은 다음처럼 단순한 필드만 가집니다.
 
-Outputs:
+```json
+{
+  "schema_version": "jev-roleplay-dataset-v1",
+  "preamble": [
+    {"role": "assistant", "content": "[배경]\n비가 내린다."}
+  ],
+  "turns": [
+    {"turn": 1, "user": "누구야?", "assistant": "[엘레노어]\n\"나야.\""}
+  ]
+}
+```
 
-- `data/sample.jsonl`: sampled conversations
-- `data/sample.manifest.json`: source, seed, eligibility constraints, planned API
-  calls, and cumulative prefix-text characters
+### Evaluate
 
-The length filters make the first experiment bounded and reduce the risk of full
-prefixes exceeding Jev's documented context limit. Character count is only a
-conservative proxy—not a tokenizer—so the API's token count remains authoritative.
-The filters introduce a selection constraint and should be reported with findings.
-
-Use a local downloaded file, a different sample size, or wider length range as
-needed:
+실제 Prompt는 [`prompts/event_boundary.json`](prompts/event_boundary.json)에 있습니다.
 
 ```bash
-.venv/bin/jev-pippa prepare --source /path/to/pippa_deduped.jsonl --count 30 \
-  --min-turns 6 --max-turns 80 --seed 20260920
+.venv/bin/jev-pipeline evaluate \
+  --dataset data/run/dataset.refined.json \
+  --output data/run/evaluations.jsonl
 ```
 
-## 2. Run evaluations (resumable)
+각 완료된 AI turn까지의 전체 대화가 하나의 Jev state가 됩니다. `ai_response`가 빈 마지막 turn은 평가하지 않습니다.
 
-First validate the whole pipeline without calling Jev:
+특정 turn만 평가할 때는 `--turn 12 --turn 18`처럼 반복합니다.
+
+### Report
 
 ```bash
-.venv/bin/jev-pippa run --mock --limit 20
-.venv/bin/jev-pippa analyze --model mock:jev-latest
+.venv/bin/jev-pipeline report \
+  --evaluations data/run/evaluations.jsonl \
+  --csv data/run/report.csv \
+  --markdown data/run/report.md
 ```
 
-Mock values are conspicuously stored under `mock:jev-latest` and must never be
-interpreted as Jev output.
+Report에는 turn별로 다음 점수가 들어갑니다.
 
-For the real API:
+- Event Boundary
+- Time Change
+- Space Change
+- Characters Change
+- Causality Change
+- Object Interactions Change
+- Goals Change
+
+## 4. 전체 파이프라인 실행
 
 ```bash
-export TYPESAFE_API_KEY='...'
-.venv/bin/jev-pippa run
+scripts/run_pipeline.sh \
+  --input /absolute/path/to/dataset.json \
+  --output-dir data/my_run
 ```
 
-Useful cautious first call:
+생성 파일:
 
-```bash
-.venv/bin/jev-pippa run --limit 5
+```text
+data/my_run/
+  dataset.refined.json
+  evaluations.jsonl
+  report.csv
+  report.md
 ```
 
-Successful requests are committed immediately to `data/results.sqlite3`. The
-unique key is conversation + turn + question-file hash + requested model, so a
-restart skips completed work. A changed question file or model creates a separate
-run rather than silently mixing results. Failures are recorded but remain
-retryable. Add `--keep-going` to continue after a failed prefix.
+동일한 dataset, state, Prompt, 모델의 평가가 이미 있으면 Jev API를 다시 호출하지 않습니다.
 
-Stored fields include conversation ID, 1-based turn index, total utterances,
-normalized position, last speaker, all three values, latency, state and request
-lengths, token usage, requested and returned model names, question hash, and the
-complete raw JSON response.
-
-Because `jev-latest` is a moving alias, `model_returned` is important for
-reproducibility. To pin the version documented on 2026-09-20, pass
-`--model jev-1.13.0`; otherwise the default follows the current stable model.
-If an alias changes during a resumed run, the runner stops instead of mixing
-returned model versions in one trajectory set.
-
-### Run the laboratory Qwen judge
-
-The OpenAI-compatible Qwen runner asks each question independently, disables
-thinking, and converts the first-token `YES`/`NO` log probabilities into a
-normalized score. The three questions are submitted concurrently and their raw
-responses and per-question latency are retained inside `raw_response_json`.
-
-When the laboratory endpoint is directly reachable:
-
-```bash
-.venv/bin/jev-pippa run-qwen \
-  --endpoint http://suzy.kaist.ac.kr:11500/v1/chat/completions \
-  --model qwen3.8:27b-q4_K_M \
-  --keep-going
-```
-
-If direct access is unavailable, create the tunnel in a separate terminal and
-use the command's default localhost endpoint:
-
-```bash
-ssh -N -L 11500:127.0.0.1:11500 suzy.kaist.ac.kr
-.venv/bin/jev-pippa run-qwen --keep-going
-```
-
-Qwen rows use the distinct requested-model key
-`qwen:qwen3.8:27b-q4_K_M`, so they coexist with Jev rows and resume without
-duplicate calls. Generate a separate Qwen report with:
-
-```bash
-.venv/bin/jev-pippa analyze \
-  --model 'qwen:qwen3.8:27b-q4_K_M' \
-  --output-dir outputs/qwen
-```
-
-## 3. Analyze trajectories and transitions
-
-```bash
-.venv/bin/jev-pippa analyze
-```
-
-This creates:
-
-- `outputs/plots/<conversation_id>.svg`: one three-line trajectory per conversation
-- `outputs/trajectories.csv`: scores and consecutive-turn deltas
-- `outputs/interesting_transitions.csv`: positive spikes, negative drops, and
-  high-score regions
-- `outputs/report.md`: top transitions with the trajectory and nearby original
-  dialogue turns
-
-Thresholds and context size are exploratory controls:
-
-```bash
-.venv/bin/jev-pippa analyze --spike-threshold 0.20 \
-  --high-threshold 0.70 --context-radius 4 --top 80
-```
-
-To inspect any point directly:
-
-```bash
-.venv/bin/jev-pippa inspect CONVERSATION_ID 17 --radius 4
-```
-
-## Local web explorer
-
-Export the latest real Jev run and start the interactive localhost view:
-
-```bash
-python3 scripts/export_web_data.py
-cd web
-npm install
-npm run dev
-```
-
-The explorer lists all conversations with their average API latency. Selecting a
-turn in the trajectory scrolls the complete dialogue log to that turn and shows
-its three scores and per-turn latency. The exported dialogue JSON is ignored by
-Git because PIPPA may contain sensitive or NSFW material.
-
-## Interpretation cautions
-
-- Look for coherent, recurring trajectory shapes and inspect the source dialogue;
-  do not call a high score “correct.”
-- Adjacent prefixes are highly dependent observations.
-- Scores on assistant-ending prefixes can change even when the latest human turn
-  is unchanged, because the newly added assistant response changes its context.
-- Question wording, model version, conversation length, role-play style, and the
-  sampling filters can all affect trajectories.
-- `engagement_drop` is especially underdetermined early in a conversation; its
-  question explicitly favors a low value when prior human evidence is insufficient.
-
-## Tests
+## 테스트
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+실제 채팅 데이터와 `data/` 결과는 Git에 포함하지 않습니다. Jev의 `noul` 값은 모델 확률 신호이며 사람 라벨이나 보정된 측정값이 아닙니다.
