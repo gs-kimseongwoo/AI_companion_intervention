@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Zeta Conversation Exporter",
+  "version": "0.1.0",
+  "description": "Export the current Zeta conversation as JSON or Markdown.",
+  "permissions": ["downloads", "activeTab"],
+  "host_permissions": ["https://zeta-ai.io/*"],
+  "action": {
+    "default_title": "Export Zeta conversation",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://zeta-ai.io/ko/rooms/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

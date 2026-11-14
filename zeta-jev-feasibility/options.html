@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Zeta × JEV 설정</title>
+    <link rel="stylesheet" href="ui.css">
+  </head>
+  <body class="options">
+    <main>
+      <h1>Zeta × JEV Feasibility 설정</h1>
+      <p class="help warning">대화 전문 일부가 JEV endpoint로 전송됩니다. 연구용 계정과 동의된 데이터에서만 사용하세요. API 키는 Chrome 로컬 저장소에 보관되며 Zeta 페이지에는 주입되지 않습니다.</p>
+      <form id="form">
+        <div class="field"><label for="apiKey">TypeSafe API key</label><input id="apiKey" type="password" autocomplete="off"></div>
+        <div class="field"><label for="endpoint">Endpoint</label><input id="endpoint" type="url" required></div>
+        <div class="field"><label for="model">Model</label><input id="model" required></div>
+        <div class="field"><label for="timeoutMs">JEV timeout (ms)</label><input id="timeoutMs" type="number" min="1000" max="120000" required></div>
+        <div class="field"><label for="maxTurns">요청에 포함할 최근 turn 수</label><input id="maxTurns" type="number" min="2" max="200" required><p class="help">현재 프로토타입은 가상 목록에서 현재 로드된 turn 중 최근 N개를 보냅니다.</p></div>
+        <button type="submit">저장</button><span id="saved"></span>
+      </form>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

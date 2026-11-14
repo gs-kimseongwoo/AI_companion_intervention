@@ -1,0 +1,19 @@
+.zjf-hidden-reply {
+  visibility: hidden !important;
+}
+
+#zjf-waiting-indicator {
+  position: fixed;
+  right: 16px;
+  bottom: 92px;
+  z-index: 2147483647;
+  max-width: 260px;
+  padding: 9px 12px;
+  border-radius: 999px;
+  color: #49368a;
+  background: rgba(244, 240, 255, .96);
+  border: 1px solid #d7ccfa;
+  box-shadow: 0 4px 16px rgba(35, 24, 70, .16);
+  font: 600 12px/1.3 system-ui, sans-serif;
+  pointer-events: none;
+}

@@ -1,0 +1,12 @@
+:root { color-scheme: light; font-family: system-ui, sans-serif; }
+body { margin: 0; width: 320px; color: #242124; background: #faf8fb; }
+main { padding: 18px; }
+h1 { margin: 0 0 10px; font-size: 18px; }
+p { margin: 8px 0 14px; font-size: 13px; line-height: 1.45; }
+.buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+button { border: 0; border-radius: 9px; padding: 10px; font-weight: 700; color: white; background: #7654d6; cursor: pointer; }
+button.secondary { color: #5e43ae; background: #ece6ff; }
+button:disabled { cursor: wait; opacity: .55; }
+.note { margin-bottom: 0; color: #706a73; font-size: 11px; }
+.error { color: #a32626; }
+.success { color: #28734e; }
