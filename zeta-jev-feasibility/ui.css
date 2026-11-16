@@ -5,6 +5,9 @@ main { padding: 18px; }
 h1 { margin: 0 0 16px; font-size: 19px; }
 .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; }
 #summary { margin: 16px 0; padding: 12px; border-radius: 9px; background: #f0ecf5; font-size: 12px; line-height: 1.6; }
+#connection { margin: 12px 0 -4px; padding: 9px 11px; border: 1px solid #d8d1df; border-radius: 9px; color: #5d5761; background: #fff; font-size: 12px; line-height: 1.45; }
+#connection.ready { border-color: #aad6bc; color: #286642; background: #f1fbf5; }
+#connection.error { border-color: #e2b4b4; color: #8a3030; background: #fff4f4; }
 .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 button { border: 0; border-radius: 9px; padding: 10px; font-weight: 700; color: white; background: #7654d6; cursor: pointer; }
 button.secondary { color: #5e43ae; background: #ece6ff; }
