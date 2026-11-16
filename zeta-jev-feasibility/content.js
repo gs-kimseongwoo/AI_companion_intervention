@@ -89,14 +89,29 @@ function visibleTurns() {
   return turns.sort((a, b) => a.index - b.index);
 }
 
-function showIndicator() {
+function showIndicator(text = "JEV 응답 기다리는 중…") {
   let indicator = document.querySelector("#zjf-waiting-indicator");
   if (!indicator) {
     indicator = document.createElement("div");
     indicator.id = "zjf-waiting-indicator";
-    indicator.textContent = "응답 타이밍을 확인하는 중…";
     document.body.appendChild(indicator);
   }
+  indicator.textContent = text;
+}
+
+function startWaitingIndicator(active) {
+  const render = () => {
+    const seconds = (performance.now() - active.requestStartedPerf) / 1000;
+    showIndicator(`JEV 응답 기다리는 중 · ${seconds.toFixed(1)}s`);
+  };
+  render();
+  active.waitingTimer = setInterval(render, 100);
+}
+
+function stopWaitingIndicator(active) {
+  if (active?.waitingTimer) clearInterval(active.waitingTimer);
+  if (active) active.waitingTimer = null;
+  document.querySelector("#zjf-waiting-indicator")?.remove();
 }
 
 function revealAll() {
@@ -125,11 +140,16 @@ function showContextShiftPopup(score, onReveal) {
 function hideAssistant(turn) {
   if (!runtime.active || runtime.active.finished) return;
   turn.side.classList.add("zjf-hidden-reply");
-  showIndicator();
   runtime.active.assistantKey = turn.key;
   if (!runtime.active.assistantFirstDetectedAt) {
     runtime.active.assistantFirstDetectedAt = nowIso();
     runtime.active.assistantFirstDetectedPerf = performance.now();
+    if (runtime.active.logCreated) {
+      updateLog(runtime.active.eventId, {
+        zeta_response_detected_at: runtime.active.assistantFirstDetectedAt,
+        assistant_message_key: runtime.active.assistantKey
+      });
+    }
   }
 }
 
@@ -163,45 +183,27 @@ async function finishActive(active, releaseReason) {
   if (runtime.active !== active || active.finished) return;
   const finishedPerf = performance.now();
   active.finished = true;
+  stopWaitingIndicator(active);
   revealAll();
   document.querySelector("#zjf-context-shift-popup")?.remove();
   runtime.active = null;
 
-  const result = active.result;
-  const score = active.contextShiftScore;
   const decisionFinishedPerf = active.decisionFinishedPerf ?? finishedPerf;
-  await appendLog({
-    schema: "zeta-jev-feasibility-event/5",
-    room_url: `${location.origin}${location.pathname}`,
-    trigger_message_key: active.userKey,
-    trigger_source: active.triggerSource,
+  await updateLog(active.eventId, {
+    status: "completed",
     assistant_message_key: active.assistantKey,
-    request_started_at: active.requestStartedAt,
-    assistant_first_detected_at: active.assistantFirstDetectedAt,
-    request_finished_at: active.requestFinishedAt,
+    zeta_response_detected_at: active.assistantFirstDetectedAt,
     released_at: nowIso(),
     release_reason: releaseReason,
-    api_latency_ms: result?.latencyMs ?? null,
-    decision_round_trip_ms: decisionFinishedPerf - active.requestStartedPerf,
-    assistant_hidden_ms: active.assistantFirstDetectedPerf === null
+    total_zeta_hidden_ms: active.assistantFirstDetectedPerf === null
       ? 0
-      : finishedPerf - active.assistantFirstDetectedPerf,
-    hidden_until_decision_ms: active.assistantFirstDetectedPerf === null
-      ? 0
-      : Math.max(0, decisionFinishedPerf - active.assistantFirstDetectedPerf),
-    intervention_hold_ms: active.popupShown
+      : Math.max(0, finishedPerf - active.assistantFirstDetectedPerf),
+    popup_hold_after_jev_ms: active.popupShown
       ? Math.max(0, finishedPerf - decisionFinishedPerf)
-      : 0,
-    jev_finished_before_zeta_reply: active.assistantFirstDetectedAtDecision === null,
-    request_turn_count: active.requestTurnCount,
-    request_character_count: active.requestCharacterCount,
-    intervention_threshold: INTERVENTION_THRESHOLD,
-    context_shift_score: Number.isFinite(score) ? score : null,
-    popup_shown: active.popupShown,
-    success: Boolean(result?.ok),
-    error: result?.ok ? null : (result?.error || "Unknown error"),
-    jev_response: result?.response || null
+      : 0
   });
+  const result = active.result;
+  const score = active.contextShiftScore;
   publishStatus(
     result?.ok ? "last_request_succeeded" : "last_request_failed",
     result?.ok
@@ -218,6 +220,7 @@ async function evaluateFor(userText, triggerSource) {
   publishStatus("requesting", `JEV 요청 중 · ${request.conversationPrefix.length} turns`);
   const startedPerf = performance.now();
   const active = {
+    eventId: crypto.randomUUID(),
     userKey: `send-${Date.now()}`,
     triggerSource,
     requestStartedAt: nowIso(),
@@ -233,16 +236,55 @@ async function evaluateFor(userText, triggerSource) {
     requestFinishedAt: null,
     assistantFirstDetectedAtDecision: null,
     popupShown: false,
+    logCreated: false,
+    waitingTimer: null,
     finished: false
   };
   runtime.active = active;
+  startWaitingIndicator(active);
+
+  const jevPromise = chrome.runtime.sendMessage({ type: "JEV_EVALUATE", payload: request.payload });
+  await appendLog({
+    schema: "zeta-jev-feasibility-event/6",
+    event_id: active.eventId,
+    status: "waiting_for_jev",
+    room_url: `${location.origin}${location.pathname}`,
+    triggered_at: active.requestStartedAt,
+    trigger_source: active.triggerSource,
+    request_turn_count: active.requestTurnCount,
+    request_character_count: active.requestCharacterCount,
+    jev_returned_at: null,
+    jev_response: null,
+    jev_error: null,
+    jev_context_shift_score: null,
+    jev_latency_ms: null,
+    zeta_response_detected_at: null,
+    jev_returned_before_zeta_response: null,
+    extra_wait_after_zeta_response_ms: null,
+    threshold: INTERVENTION_THRESHOLD,
+    decision: "waiting_for_jev",
+    assistant_message_key: null,
+    released_at: null,
+    release_reason: null,
+    total_zeta_hidden_ms: 0,
+    popup_hold_after_jev_ms: 0
+  });
+  active.logCreated = true;
+  if (active.assistantFirstDetectedAt) {
+    await updateLog(active.eventId, {
+      zeta_response_detected_at: active.assistantFirstDetectedAt,
+      assistant_message_key: active.assistantKey
+    });
+  }
+
   let result;
   try {
-    result = await chrome.runtime.sendMessage({ type: "JEV_EVALUATE", payload: request.payload });
+    result = await jevPromise;
   } catch (error) {
     result = { ok: false, error: error.message };
   }
   if (runtime.active !== active || active.finished) return;
+  stopWaitingIndicator(active);
   const decisionFinishedPerf = performance.now();
   const contextShiftScore = Number(result?.response?.answers?.context_shift?.noul);
   const shouldIntervene = Boolean(
@@ -255,9 +297,46 @@ async function evaluateFor(userText, triggerSource) {
   active.decisionFinishedPerf = decisionFinishedPerf;
   active.requestFinishedAt = nowIso();
   active.assistantFirstDetectedAtDecision = active.assistantFirstDetectedAt;
+  const jevReturnedBeforeZeta = active.assistantFirstDetectedAtDecision === null;
+  const extraWaitAfterZetaMs = jevReturnedBeforeZeta
+    ? 0
+    : Math.max(0, decisionFinishedPerf - active.assistantFirstDetectedPerf);
+  const decision = !result?.ok || !Number.isFinite(contextShiftScore)
+    ? "fail_open"
+    : (shouldIntervene ? "hold_and_popup" : "show_zeta_response");
+
+  // One readable record per human send. Save it as soon as JEV returns; later
+  // Zeta arrival/release events update the same event_id.
+  await updateLog(active.eventId, {
+    status: shouldIntervene ? "holding_for_user" : "decision_complete",
+    jev_returned_at: active.requestFinishedAt,
+    jev_response: result?.response || null,
+    jev_error: result?.ok ? null : (result?.error || "Unknown error"),
+    jev_context_shift_score: Number.isFinite(contextShiftScore) ? contextShiftScore : null,
+    jev_latency_ms: result?.latencyMs ?? null,
+    zeta_response_detected_at: active.assistantFirstDetectedAt,
+    jev_returned_before_zeta_response: jevReturnedBeforeZeta,
+    extra_wait_after_zeta_response_ms: extraWaitAfterZetaMs,
+    threshold: INTERVENTION_THRESHOLD,
+    decision,
+    assistant_message_key: active.assistantKey,
+    released_at: null,
+    release_reason: null,
+    total_zeta_hidden_ms: extraWaitAfterZetaMs,
+    popup_hold_after_jev_ms: 0
+  });
+  if (jevReturnedBeforeZeta && active.assistantFirstDetectedAt) {
+    await updateLog(active.eventId, {
+      zeta_response_detected_at: active.assistantFirstDetectedAt,
+      assistant_message_key: active.assistantKey
+    });
+  }
 
   if (!shouldIntervene) {
-    await finishActive(active, result?.ok ? "below_threshold" : "request_failed");
+    const releaseReason = !result?.ok
+      ? "jev_request_failed"
+      : (Number.isFinite(contextShiftScore) ? "score_below_threshold" : "invalid_jev_score");
+    await finishActive(active, releaseReason);
     return;
   }
 
@@ -274,6 +353,17 @@ async function evaluateFor(userText, triggerSource) {
 async function appendLog(event) {
   const { feasibilityLogs = [] } = await chrome.storage.local.get("feasibilityLogs");
   feasibilityLogs.push(event);
+  await chrome.storage.local.set({ feasibilityLogs: feasibilityLogs.slice(-500) });
+}
+
+async function updateLog(eventId, patch) {
+  const { feasibilityLogs = [] } = await chrome.storage.local.get("feasibilityLogs");
+  const index = feasibilityLogs.findIndex((event) => event.event_id === eventId);
+  if (index < 0) {
+    feasibilityLogs.push({ event_id: eventId, ...patch });
+  } else {
+    feasibilityLogs[index] = { ...feasibilityLogs[index], ...patch };
+  }
   await chrome.storage.local.set({ feasibilityLogs: feasibilityLogs.slice(-500) });
 }
 

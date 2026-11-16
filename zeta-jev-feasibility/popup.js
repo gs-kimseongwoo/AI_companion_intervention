@@ -23,24 +23,40 @@ function connectionText(status) {
 
 function stats(logs) {
   if (!logs.length) return "아직 측정 기록이 없습니다.";
-  const success = logs.filter((log) => log.success);
-  const percentile = (values, p) => {
-    if (!values.length) return null;
-    const sorted = [...values].sort((a, b) => a - b);
-    return sorted[Math.ceil((sorted.length - 1) * p)];
-  };
-  const hidden = success.map((log) => log.assistant_hidden_ms).filter(Number.isFinite);
-  const api = success.map((log) => log.api_latency_ms).filter(Number.isFinite);
-  const hiddenP50 = percentile(hidden, .5);
-  const hiddenP90 = percentile(hidden, .9);
-  const apiP50 = percentile(api, .5);
   const last = logs.at(-1);
+  if (last.decision === "waiting_for_jev") {
+    const started = Date.parse(last.triggered_at);
+    const elapsed = Number.isFinite(started) ? Math.max(0, Date.now() - started) : null;
+    return [
+      `저장된 요청 ${logs.length}개`,
+      "최근 요청: JEV 응답 기다리는 중",
+      `현재 경과: ${elapsed === null ? "계산 불가" : `${elapsed}ms`}`,
+      `Zeta AI 응답: ${last.zeta_response_detected_at ? "이미 도착해서 가리는 중" : "아직 도착하지 않음"}`
+    ].join("<br>");
+  }
+  const latency = last.jev_latency_ms ?? last.api_latency_ms;
+  const score = last.jev_context_shift_score ?? last.context_shift_score;
+  const before = last.jev_returned_before_zeta_response ?? last.jev_finished_before_zeta_reply;
+  const extraWait = last.extra_wait_after_zeta_response_ms
+    ?? (before === false ? last.hidden_until_decision_ms : 0);
+  const decisionLabels = {
+    hold_and_popup: "응답 계속 가림 + 팝업",
+    show_zeta_response: "Zeta 응답 공개",
+    fail_open: "JEV 오류로 Zeta 응답 공개"
+  };
+  const timing = before === true
+    ? "JEV가 Zeta 응답보다 먼저 도착 · 추가 대기 0ms"
+    : (before === false
+      ? `Zeta 응답 후 JEV가 ${Math.round(extraWait || 0)}ms 뒤 도착`
+      : "Zeta/JEV 도착 순서 기록 없음");
   return [
-    `전체 ${logs.length}회 · 성공 ${success.length}회 · 실패 ${logs.length - success.length}회`,
-    hiddenP50 === null ? "성공 요청 없음" : `전체 가림 p50 ${Math.round(hiddenP50)}ms · p90 ${Math.round(hiddenP90)}ms`,
-    apiP50 === null ? "API 지연 기록 없음" : `JEV API p50 ${Math.round(apiP50)}ms`,
-    `최근: ${last.success ? `실제 가림 ${Math.round(last.assistant_hidden_ms)}ms` : last.error}`
-  ].join("<br>");
+    `저장된 요청 ${logs.length}개`,
+    `최근 JEV score: ${Number.isFinite(score) ? Number(score).toFixed(3) : "없음"}`,
+    `JEV 응답 시간: ${Number.isFinite(latency) ? `${Math.round(latency)}ms` : "기록 없음"}`,
+    timing,
+    `결정: ${decisionLabels[last.decision] || last.decision || "이전 로그 형식"}`,
+    last.jev_error ? `오류: ${last.jev_error}` : ""
+  ].filter(Boolean).join("<br>");
 }
 
 async function refresh() {
@@ -60,7 +76,7 @@ enabled.addEventListener("change", async () => {
 document.querySelector("#download").addEventListener("click", async () => {
   const { feasibilityLogs = [] } = await chrome.storage.local.get("feasibilityLogs");
   const blob = new Blob([JSON.stringify({
-    schema: "zeta-jev-feasibility-log/1",
+    schema: "zeta-jev-feasibility-log/2",
     exported_at: new Date().toISOString(),
     events: feasibilityLogs
   }, null, 2)], { type: "application/json" });
@@ -80,4 +96,8 @@ document.querySelector("#clear").addEventListener("click", async () => {
 });
 
 document.querySelector("#options").addEventListener("click", () => chrome.runtime.openOptionsPage());
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && (changes.feasibilityLogs || changes.feasibilityStatus)) refresh();
+});
+setInterval(refresh, 500);
 refresh();
