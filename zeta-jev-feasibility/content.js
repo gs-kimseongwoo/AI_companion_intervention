@@ -9,6 +9,8 @@ const QUESTIONS = {
   }
 };
 
+const INTERVENTION_THRESHOLD = 0.4;
+
 const runtime = {
   settings: null,
   log: null,
@@ -102,7 +104,7 @@ function revealAll() {
   document.querySelector("#zjf-waiting-indicator")?.remove();
 }
 
-function showContextShiftPopup() {
+function showContextShiftPopup(score, onReveal) {
   document.querySelector("#zjf-context-shift-popup")?.remove();
   const popup = document.createElement("section");
   popup.id = "zjf-context-shift-popup";
@@ -112,12 +114,11 @@ function showContextShiftPopup() {
   popup.innerHTML = `
     <button class="zjf-popup-close" type="button" aria-label="닫기">×</button>
     <strong id="zjf-context-shift-title">대화 흐름이 바뀐 것 같아요</strong>
-    <p>지금 잠시 쉬었다가 이어가도 좋아요.</p>
-    <button class="zjf-popup-continue" type="button">계속 대화하기</button>
+    <p>JEV context shift ${score.toFixed(3)} · 응답을 보기 전에 잠시 확인해 보세요.</p>
+    <button class="zjf-popup-continue" type="button">응답 보기</button>
   `;
-  const close = () => popup.remove();
-  popup.querySelector(".zjf-popup-close").addEventListener("click", close);
-  popup.querySelector(".zjf-popup-continue").addEventListener("click", close);
+  popup.querySelector(".zjf-popup-close").addEventListener("click", onReveal);
+  popup.querySelector(".zjf-popup-continue").addEventListener("click", onReveal);
   document.body.appendChild(popup);
 }
 
@@ -134,10 +135,11 @@ function hideAssistant(turn) {
 
 function requestState(userText) {
   const allTurns = visibleTurns().filter((turn) => turn.text);
-  const throughUser = [
-    ...allTurns,
-    { speaker: "human", text: userText }
-  ];
+  const latest = allTurns.at(-1);
+  const userAlreadyPresent = latest?.speaker === "human" && latest.text === userText;
+  const throughUser = userAlreadyPresent
+    ? allTurns
+    : [...allTurns, { speaker: "human", text: userText }];
   const prefix = throughUser.slice(-Number(runtime.settings.maxTurns));
   const conversationPrefix = prefix.map((turn, index) => ({
     turn_index: String(index + 1),
@@ -157,6 +159,58 @@ function requestState(userText) {
   };
 }
 
+async function finishActive(active, releaseReason) {
+  if (runtime.active !== active || active.finished) return;
+  const finishedPerf = performance.now();
+  active.finished = true;
+  revealAll();
+  document.querySelector("#zjf-context-shift-popup")?.remove();
+  runtime.active = null;
+
+  const result = active.result;
+  const score = active.contextShiftScore;
+  const decisionFinishedPerf = active.decisionFinishedPerf ?? finishedPerf;
+  await appendLog({
+    schema: "zeta-jev-feasibility-event/5",
+    room_url: `${location.origin}${location.pathname}`,
+    trigger_message_key: active.userKey,
+    trigger_source: active.triggerSource,
+    assistant_message_key: active.assistantKey,
+    request_started_at: active.requestStartedAt,
+    assistant_first_detected_at: active.assistantFirstDetectedAt,
+    request_finished_at: active.requestFinishedAt,
+    released_at: nowIso(),
+    release_reason: releaseReason,
+    api_latency_ms: result?.latencyMs ?? null,
+    decision_round_trip_ms: decisionFinishedPerf - active.requestStartedPerf,
+    assistant_hidden_ms: active.assistantFirstDetectedPerf === null
+      ? 0
+      : finishedPerf - active.assistantFirstDetectedPerf,
+    hidden_until_decision_ms: active.assistantFirstDetectedPerf === null
+      ? 0
+      : Math.max(0, decisionFinishedPerf - active.assistantFirstDetectedPerf),
+    intervention_hold_ms: active.popupShown
+      ? Math.max(0, finishedPerf - decisionFinishedPerf)
+      : 0,
+    jev_finished_before_zeta_reply: active.assistantFirstDetectedAtDecision === null,
+    request_turn_count: active.requestTurnCount,
+    request_character_count: active.requestCharacterCount,
+    intervention_threshold: INTERVENTION_THRESHOLD,
+    context_shift_score: Number.isFinite(score) ? score : null,
+    popup_shown: active.popupShown,
+    success: Boolean(result?.ok),
+    error: result?.ok ? null : (result?.error || "Unknown error"),
+    jev_response: result?.response || null
+  });
+  publishStatus(
+    result?.ok ? "last_request_succeeded" : "last_request_failed",
+    result?.ok
+      ? `최근 요청 성공 · score ${Number.isFinite(score) ? score.toFixed(3) : "없음"} · ${Math.round(result.latencyMs ?? 0)}ms`
+      : (result?.error || "Unknown error")
+  );
+  scan();
+}
+
 async function evaluateFor(userText, triggerSource) {
   if (runtime.active || !runtime.settings.enabled) return;
   const request = requestState(userText);
@@ -173,6 +227,12 @@ async function evaluateFor(userText, triggerSource) {
     assistantFirstDetectedAt: null,
     assistantFirstDetectedPerf: null,
     assistantKey: null,
+    result: null,
+    contextShiftScore: null,
+    decisionFinishedPerf: null,
+    requestFinishedAt: null,
+    assistantFirstDetectedAtDecision: null,
+    popupShown: false,
     finished: false
   };
   runtime.active = active;
@@ -182,40 +242,32 @@ async function evaluateFor(userText, triggerSource) {
   } catch (error) {
     result = { ok: false, error: error.message };
   }
-  const finishedPerf = performance.now();
+  if (runtime.active !== active || active.finished) return;
+  const decisionFinishedPerf = performance.now();
   const contextShiftScore = Number(result?.response?.answers?.context_shift?.noul);
-  const popupShown = Boolean(result?.ok && Number.isFinite(contextShiftScore) && contextShiftScore > 0.5);
-  active.finished = true;
-  revealAll();
-  runtime.active = null;
-  if (popupShown) showContextShiftPopup();
-  await appendLog({
-    schema: "zeta-jev-feasibility-event/4",
-    room_url: `${location.origin}${location.pathname}`,
-    trigger_message_key: active.userKey,
-    trigger_source: active.triggerSource,
-    assistant_message_key: active.assistantKey,
-    request_started_at: active.requestStartedAt,
-    assistant_first_detected_at: active.assistantFirstDetectedAt,
-    request_finished_at: nowIso(),
-    api_latency_ms: result?.latencyMs ?? null,
-    decision_round_trip_ms: finishedPerf - active.requestStartedPerf,
-    assistant_hidden_ms: active.assistantFirstDetectedPerf === null
-      ? 0
-      : finishedPerf - active.assistantFirstDetectedPerf,
-    jev_finished_before_zeta_reply: active.assistantFirstDetectedPerf === null,
-    request_turn_count: active.requestTurnCount,
-    request_character_count: active.requestCharacterCount,
-    context_shift_score: Number.isFinite(contextShiftScore) ? contextShiftScore : null,
-    popup_shown: popupShown,
-    success: Boolean(result?.ok),
-    error: result?.ok ? null : (result?.error || "Unknown error"),
-    jev_response: result?.response || null
-  });
-  publishStatus(
-    result?.ok ? "last_request_succeeded" : "last_request_failed",
-    result?.ok ? `최근 요청 성공 · ${Math.round(result.latencyMs ?? 0)}ms` : (result?.error || "Unknown error")
+  const shouldIntervene = Boolean(
+    result?.ok
+    && Number.isFinite(contextShiftScore)
+    && contextShiftScore >= INTERVENTION_THRESHOLD
   );
+  active.result = result;
+  active.contextShiftScore = contextShiftScore;
+  active.decisionFinishedPerf = decisionFinishedPerf;
+  active.requestFinishedAt = nowIso();
+  active.assistantFirstDetectedAtDecision = active.assistantFirstDetectedAt;
+
+  if (!shouldIntervene) {
+    await finishActive(active, result?.ok ? "below_threshold" : "request_failed");
+    return;
+  }
+
+  active.popupShown = true;
+  showContextShiftPopup(contextShiftScore, () => finishActive(active, "user_revealed_response"));
+  publishStatus(
+    "intervention_holding",
+    `score ${contextShiftScore.toFixed(3)} ≥ ${INTERVENTION_THRESHOLD} · 응답 공개 대기 중`
+  );
+  // JEV may finish before Zeta creates its reply. Keep active so that a later reply is hidden.
   scan();
 }
 
@@ -236,9 +288,16 @@ function scan() {
       }
     }
   }
+  const newTurns = turns.filter((turn) => !runtime.baselineKeys.has(turn.key) && turn.text);
   for (const turn of turns) {
     runtime.baselineKeys.add(turn.key);
   }
+  if (runtime.active || !newTurns.length) return;
+
+  // DOM fallback: only evaluate when the actual latest visible chat is a new human turn.
+  const latest = turns.filter((turn) => turn.text).at(-1);
+  if (latest?.speaker !== "human" || !newTurns.some((turn) => turn.key === latest.key)) return;
+  triggerFromText(latest.text, "dom_human_turn");
 }
 
 function editorText(editor) {
@@ -255,9 +314,8 @@ function findComposer(from = null) {
   return focused || [...document.querySelectorAll(selector)].find((editor) => editorText(editor));
 }
 
-function triggerFromComposer(editor, source) {
+function triggerFromText(text, source) {
   if (!runtime.settings?.enabled || runtime.active) return;
-  const text = editorText(editor);
   if (!text) return;
   const duplicate = text === runtime.lastSendText
     && performance.now() - runtime.lastSendDetectedPerf < 1_500;
@@ -266,6 +324,10 @@ function triggerFromComposer(editor, source) {
   runtime.lastSendDetectedPerf = performance.now();
   publishStatus("trigger_detected", `메시지 전송 감지 · ${source}`);
   evaluateFor(text, source);
+}
+
+function triggerFromComposer(editor, source) {
+  triggerFromText(editorText(editor), source);
 }
 
 function onComposerKeydown(event) {
@@ -278,9 +340,10 @@ function onComposerKeydown(event) {
 function onComposerClick(event) {
   const button = event.target.closest?.("button");
   if (!button || button.disabled) return;
+  const isKnownSendButton = button.matches('[data-testid="chat-send-button"]');
   const label = [button.getAttribute("aria-label"), button.getAttribute("title"), button.textContent]
     .filter(Boolean).join(" ").trim().toLowerCase();
-  if (!/(^|\s)(send|전송)(\s|$)/i.test(label)) return;
+  if (!isKnownSendButton && !/(^|\s)(send|전송)(\s|$)/i.test(label)) return;
   triggerFromComposer(findComposer(button), "send_button");
 }
 
@@ -330,8 +393,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !runtime.settings) return;
   for (const [key, change] of Object.entries(changes)) runtime.settings[key] = change.newValue;
   if (!runtime.settings.enabled) {
-    if (runtime.active) runtime.active.finished = true;
-    revealAll();
+    if (runtime.active) finishActive(runtime.active, "extension_disabled");
+    else revealAll();
   } else {
     attachToConversationLog();
     visibleTurns().forEach((turn) => runtime.baselineKeys.add(turn.key));

@@ -10,10 +10,11 @@ function connectionText(status) {
     ready: "대화 감지 준비됨",
     trigger_detected: "새 사용자 발화 감지됨",
     requesting: "JEV 요청 중",
+    intervention_holding: "개입 표시 중 · 응답 가림 유지",
     last_request_succeeded: "최근 JEV 요청 성공",
     last_request_failed: "최근 JEV 요청 실패"
   };
-  const readyStates = new Set(["ready", "trigger_detected", "requesting", "last_request_succeeded"]);
+  const readyStates = new Set(["ready", "trigger_detected", "requesting", "intervention_holding", "last_request_succeeded"]);
   return {
     className: status.state === "last_request_failed" ? "error" : (readyStates.has(status.state) ? "ready" : ""),
     text: `${labels[status.state] || status.state}${status.detail ? ` · ${status.detail}` : ""}`
