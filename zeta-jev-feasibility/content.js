@@ -6,32 +6,18 @@ const QUESTIONS = {
       true: "The current turn begins or clearly establishes a meaningfully different topic, event, scene, or phase.",
       false: "The current turn continues, elaborates, or locally responds within the same topic, event, scene, or phase."
     }
-  },
-  natural_breakpoint: {
-    type: "noul",
-    instructions: "At the end of `current_turn`, could the human user naturally end this conversation now without interrupting an unresolved exchange, active question, or emotionally or narratively immediate beat? Judge local stopping-point naturalness, not whether the user should stop.",
-    criteria: {
-      true: "The interaction has a locally complete, settled, or pause-friendly boundary.",
-      false: "Ending now would noticeably interrupt an active exchange, question, action, conflict, or immediate emotional or narrative beat."
-    }
-  },
-  engagement_drop: {
-    type: "noul",
-    instructions: "Compared with the human user's earlier messages in `conversation_prefix`, does `latest_human_turn` show lower conversational engagement? Consider reduced elaboration, initiative, responsiveness, emotional investment, or willingness to continue in context. Do not treat brevity alone as disengagement. If there is not enough earlier human evidence for a comparison, favor false.",
-    criteria: {
-      true: "The latest human contribution shows a meaningful decrease in engagement relative to that user's earlier behavior in this conversation.",
-      false: "Engagement is stable or higher, the difference is not meaningful, or there is insufficient evidence."
-    }
   }
 };
 
 const runtime = {
   settings: null,
+  log: null,
   observer: null,
+  pageObserver: null,
   baselineKeys: new Set(),
   active: null,
-  lastUserText: null,
-  lastUserDetectedPerf: 0
+  lastSendText: null,
+  lastSendDetectedPerf: 0
 };
 
 function nowIso() { return new Date().toISOString(); }
@@ -56,8 +42,32 @@ function textFrom(side) {
     : nodeText(bubble).trim();
 }
 
+function findConversationLog() {
+  const explicit = document.querySelector('[role="log"]');
+  if (explicit) return explicit;
+
+  const row = document.querySelector("[data-index][data-key]");
+  let candidate = row?.parentElement || null;
+  while (candidate && candidate !== document.body) {
+    if (candidate.querySelectorAll("[data-index][data-key]").length > 1) return candidate;
+    candidate = candidate.parentElement;
+  }
+  return null;
+}
+
+async function publishStatus(state, detail = null) {
+  await chrome.storage.local.set({
+    feasibilityStatus: {
+      state,
+      detail,
+      room_url: `${location.origin}${location.pathname}`,
+      updated_at: nowIso()
+    }
+  });
+}
+
 function visibleTurns() {
-  const log = document.querySelector('[role="log"]');
+  const log = runtime.log?.isConnected ? runtime.log : findConversationLog();
   if (!log) return [];
   const turns = [];
   const selector = '[data-sentry-component="LeftTextContent"], [data-sentry-component="RightTextContent"], [data-sentry-component="NarratorBubble"]';
@@ -92,6 +102,25 @@ function revealAll() {
   document.querySelector("#zjf-waiting-indicator")?.remove();
 }
 
+function showContextShiftPopup() {
+  document.querySelector("#zjf-context-shift-popup")?.remove();
+  const popup = document.createElement("section");
+  popup.id = "zjf-context-shift-popup";
+  popup.setAttribute("role", "dialog");
+  popup.setAttribute("aria-modal", "false");
+  popup.setAttribute("aria-labelledby", "zjf-context-shift-title");
+  popup.innerHTML = `
+    <button class="zjf-popup-close" type="button" aria-label="닫기">×</button>
+    <strong id="zjf-context-shift-title">대화 흐름이 바뀐 것 같아요</strong>
+    <p>지금 잠시 쉬었다가 이어가도 좋아요.</p>
+    <button class="zjf-popup-continue" type="button">계속 대화하기</button>
+  `;
+  const close = () => popup.remove();
+  popup.querySelector(".zjf-popup-close").addEventListener("click", close);
+  popup.querySelector(".zjf-popup-continue").addEventListener("click", close);
+  document.body.appendChild(popup);
+}
+
 function hideAssistant(turn) {
   if (!runtime.active || runtime.active.finished) return;
   turn.side.classList.add("zjf-hidden-reply");
@@ -103,24 +132,24 @@ function hideAssistant(turn) {
   }
 }
 
-function requestState(userTurn) {
+function requestState(userText) {
   const allTurns = visibleTurns().filter((turn) => turn.text);
-  const targetIndex = allTurns.findIndex((turn) => turn.key === userTurn.key);
-  const throughUser = targetIndex >= 0 ? allTurns.slice(0, targetIndex + 1) : allTurns;
+  const throughUser = [
+    ...allTurns,
+    { speaker: "human", text: userText }
+  ];
   const prefix = throughUser.slice(-Number(runtime.settings.maxTurns));
   const conversationPrefix = prefix.map((turn, index) => ({
     turn_index: String(index + 1),
     speaker: turn.speaker,
     text: turn.text
   }));
-  const humanTurns = conversationPrefix.filter((turn) => turn.speaker === "human");
   return {
     conversationPrefix,
     payload: {
       state: {
         conversation_prefix: conversationPrefix,
-        current_turn: conversationPrefix.at(-1),
-        latest_human_turn: humanTurns.at(-1) || "No human turn yet."
+        current_turn: conversationPrefix.at(-1)
       },
       model: runtime.settings.model,
       questions: QUESTIONS
@@ -128,13 +157,15 @@ function requestState(userTurn) {
   };
 }
 
-async function evaluateFor(userTurn) {
+async function evaluateFor(userText, triggerSource) {
   if (runtime.active || !runtime.settings.enabled) return;
-  const request = requestState(userTurn);
+  const request = requestState(userText);
   if (!request.conversationPrefix.length) return;
+  publishStatus("requesting", `JEV 요청 중 · ${request.conversationPrefix.length} turns`);
   const startedPerf = performance.now();
   const active = {
-    userKey: userTurn.key,
+    userKey: `send-${Date.now()}`,
+    triggerSource,
     requestStartedAt: nowIso(),
     requestStartedPerf: startedPerf,
     requestTurnCount: request.conversationPrefix.length,
@@ -152,13 +183,17 @@ async function evaluateFor(userTurn) {
     result = { ok: false, error: error.message };
   }
   const finishedPerf = performance.now();
+  const contextShiftScore = Number(result?.response?.answers?.context_shift?.noul);
+  const popupShown = Boolean(result?.ok && Number.isFinite(contextShiftScore) && contextShiftScore > 0.5);
   active.finished = true;
   revealAll();
   runtime.active = null;
+  if (popupShown) showContextShiftPopup();
   await appendLog({
-    schema: "zeta-jev-feasibility-event/2",
+    schema: "zeta-jev-feasibility-event/4",
     room_url: `${location.origin}${location.pathname}`,
     trigger_message_key: active.userKey,
+    trigger_source: active.triggerSource,
     assistant_message_key: active.assistantKey,
     request_started_at: active.requestStartedAt,
     assistant_first_detected_at: active.assistantFirstDetectedAt,
@@ -171,10 +206,16 @@ async function evaluateFor(userTurn) {
     jev_finished_before_zeta_reply: active.assistantFirstDetectedPerf === null,
     request_turn_count: active.requestTurnCount,
     request_character_count: active.requestCharacterCount,
+    context_shift_score: Number.isFinite(contextShiftScore) ? contextShiftScore : null,
+    popup_shown: popupShown,
     success: Boolean(result?.ok),
     error: result?.ok ? null : (result?.error || "Unknown error"),
     jev_response: result?.response || null
   });
+  publishStatus(
+    result?.ok ? "last_request_succeeded" : "last_request_failed",
+    result?.ok ? `최근 요청 성공 · ${Math.round(result.latencyMs ?? 0)}ms` : (result?.error || "Unknown error")
+  );
   scan();
 }
 
@@ -196,16 +237,77 @@ function scan() {
     }
   }
   for (const turn of turns) {
-    if (runtime.baselineKeys.has(turn.key) || !turn.text) continue;
     runtime.baselineKeys.add(turn.key);
-    if (turn.speaker !== "human" || runtime.active) continue;
-    const duplicate = turn.text === runtime.lastUserText
-      && performance.now() - runtime.lastUserDetectedPerf < 10_000;
-    if (duplicate) continue;
-    runtime.lastUserText = turn.text;
-    runtime.lastUserDetectedPerf = performance.now();
-    evaluateFor(turn);
   }
+}
+
+function editorText(editor) {
+  if (!editor) return "";
+  return ("value" in editor ? editor.value : editor.innerText || editor.textContent || "").trim();
+}
+
+function findComposer(from = null) {
+  const selector = 'textarea, [contenteditable="true"], [role="textbox"]';
+  const nearby = from?.closest("form")?.querySelector(selector);
+  if (nearby) return nearby;
+  if (from?.matches?.(selector)) return from;
+  const focused = document.activeElement?.matches?.(selector) ? document.activeElement : null;
+  return focused || [...document.querySelectorAll(selector)].find((editor) => editorText(editor));
+}
+
+function triggerFromComposer(editor, source) {
+  if (!runtime.settings?.enabled || runtime.active) return;
+  const text = editorText(editor);
+  if (!text) return;
+  const duplicate = text === runtime.lastSendText
+    && performance.now() - runtime.lastSendDetectedPerf < 1_500;
+  if (duplicate) return;
+  runtime.lastSendText = text;
+  runtime.lastSendDetectedPerf = performance.now();
+  publishStatus("trigger_detected", `메시지 전송 감지 · ${source}`);
+  evaluateFor(text, source);
+}
+
+function onComposerKeydown(event) {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  const editor = findComposer(event.target);
+  if (!editor) return;
+  triggerFromComposer(editor, "enter");
+}
+
+function onComposerClick(event) {
+  const button = event.target.closest?.("button");
+  if (!button || button.disabled) return;
+  const label = [button.getAttribute("aria-label"), button.getAttribute("title"), button.textContent]
+    .filter(Boolean).join(" ").trim().toLowerCase();
+  if (!/(^|\s)(send|전송)(\s|$)/i.test(label)) return;
+  triggerFromComposer(findComposer(button), "send_button");
+}
+
+function onComposerSubmit(event) {
+  triggerFromComposer(findComposer(event.target), "form_submit");
+}
+
+function attachToConversationLog() {
+  const log = findConversationLog();
+  if (!log) {
+    if (runtime.log && !runtime.log.isConnected) {
+      runtime.observer?.disconnect();
+      runtime.observer = null;
+      runtime.log = null;
+    }
+    publishStatus("waiting_for_conversation", "Zeta 대화 목록을 기다리는 중입니다.");
+    return false;
+  }
+  if (runtime.log === log && runtime.observer) return true;
+
+  runtime.observer?.disconnect();
+  runtime.log = log;
+  runtime.baselineKeys = new Set(visibleTurns().map((turn) => turn.key));
+  runtime.observer = new MutationObserver(scan);
+  runtime.observer.observe(log, { childList: true, subtree: true, characterData: true });
+  publishStatus("ready", `대화 감지 준비됨 · 현재 ${runtime.baselineKeys.size} turns`);
+  return true;
 }
 
 async function start() {
@@ -215,11 +317,13 @@ async function start() {
     timeoutMs: 15000,
     maxTurns: 30
   });
-  const log = document.querySelector('[role="log"]');
-  if (!log) return;
-  visibleTurns().forEach((turn) => runtime.baselineKeys.add(turn.key));
-  runtime.observer = new MutationObserver(scan);
-  runtime.observer.observe(log, { childList: true, subtree: true, characterData: true });
+  await publishStatus("initializing", "Zeta 대화 목록을 찾는 중입니다.");
+  attachToConversationLog();
+  runtime.pageObserver = new MutationObserver(attachToConversationLog);
+  runtime.pageObserver.observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener("keydown", onComposerKeydown, true);
+  document.addEventListener("click", onComposerClick, true);
+  document.addEventListener("submit", onComposerSubmit, true);
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -229,6 +333,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (runtime.active) runtime.active.finished = true;
     revealAll();
   } else {
+    attachToConversationLog();
     visibleTurns().forEach((turn) => runtime.baselineKeys.add(turn.key));
   }
 });

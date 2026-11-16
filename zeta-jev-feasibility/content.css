@@ -17,3 +17,26 @@
   font: 600 12px/1.3 system-ui, sans-serif;
   pointer-events: none;
 }
+
+#zjf-context-shift-popup {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  z-index: 2147483647;
+  box-sizing: border-box;
+  width: min(360px, calc(100vw - 32px));
+  padding: 20px;
+  transform: translateX(-50%);
+  border: 1px solid #d7ccfa;
+  border-radius: 18px;
+  color: #2f2842;
+  background: rgba(252, 250, 255, .98);
+  box-shadow: 0 14px 44px rgba(35, 24, 70, .24);
+  font: 14px/1.45 system-ui, sans-serif;
+}
+
+#zjf-context-shift-popup strong { display: block; padding-right: 24px; font-size: 17px; }
+#zjf-context-shift-popup p { margin: 7px 0 14px; color: #5d566a; }
+#zjf-context-shift-popup button { border: 0; cursor: pointer; font: inherit; }
+#zjf-context-shift-popup .zjf-popup-close { position: absolute; top: 9px; right: 12px; padding: 4px 7px; color: #716a7d; background: transparent; font-size: 22px; }
+#zjf-context-shift-popup .zjf-popup-continue { width: 100%; padding: 10px 14px; border-radius: 10px; color: white; background: #7654d6; font-weight: 700; }
