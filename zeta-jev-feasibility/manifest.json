@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Zeta × JEV Feasibility Probe",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "Hide new Zeta replies while measuring a JEV intervention-decision round trip.",
   "permissions": ["storage", "downloads", "activeTab"],
   "host_permissions": [
