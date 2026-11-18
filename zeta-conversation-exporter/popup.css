@@ -1,12 +1,57 @@
-:root { color-scheme: light; font-family: system-ui, sans-serif; }
-body { margin: 0; width: 320px; color: #242124; background: #faf8fb; }
-main { padding: 18px; }
-h1 { margin: 0 0 10px; font-size: 18px; }
-p { margin: 8px 0 14px; font-size: 13px; line-height: 1.45; }
+:root {
+  color-scheme: dark;
+  font-family: Inter, Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --bg: #151515;
+  --surface: #1e1e1f;
+  --surface-hover: #252526;
+  --border: #2d2d2f;
+  --text: #f4f4f5;
+  --muted: #929297;
+  --subtle: #6d6d72;
+  --accent: #7c35f4;
+  --accent-hover: #8b4cff;
+  --success: #7ed6a6;
+  --error: #ff8585;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; width: 360px; color: var(--text); background: var(--bg); }
+main { padding: 20px; }
+p { margin: 0; font-size: 13px; line-height: 1.45; }
+
+.header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
+.eyebrow { margin-bottom: 4px; color: var(--subtle); font-size: 11px; font-weight: 800; letter-spacing: .14em; }
+h1 { margin: 0; font-size: 23px; line-height: 1.25; letter-spacing: -.025em; }
+.format-badge { border: 1px solid var(--border); border-radius: 999px; padding: 7px 10px; color: var(--muted); background: #1a1a1b; font-size: 12px; font-weight: 750; }
+
+.room-card { display: flex; align-items: center; gap: 11px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 14px; padding: 13px 14px; background: var(--surface); }
+.room-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px rgb(124 53 244 / 14%); }
+.room-label { margin-bottom: 2px; color: var(--subtle); font-size: 13px; font-weight: 700; }
+.room-title { max-width: 270px; overflow: hidden; color: #dedee1; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.cached-count { margin: -2px 2px 12px; color: var(--muted); font-size: 13px; }
+
+.status { min-height: 19px; margin: 9px 2px 1px; color: var(--muted); font-size: 13px; }
+.count { margin: 14px 0; border: 1px solid var(--border); border-radius: 12px; padding: 12px; color: #d7c3ff; background: var(--surface); font-size: 13px; font-weight: 750; text-align: center; }
 .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-button { border: 0; border-radius: 9px; padding: 10px; font-weight: 700; color: white; background: #7654d6; cursor: pointer; }
-button.secondary { color: #5e43ae; background: #ece6ff; }
-button:disabled { cursor: wait; opacity: .55; }
-.note { margin-bottom: 0; color: #706a73; font-size: 11px; }
-.error { color: #a32626; }
-.success { color: #28734e; }
+
+button { width: 100%; min-height: 43px; border: 1px solid transparent; border-radius: 12px; padding: 10px 13px; font: inherit; font-size: 13px; font-weight: 750; cursor: pointer; transition: background-color .15s ease, border-color .15s ease, transform .15s ease; }
+button:hover:not(:disabled) { transform: translateY(-1px); }
+button.primary { color: #fff; background: var(--accent); }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+button.secondary { border-color: var(--border); color: #e6e6e8; background: var(--surface); }
+button.secondary:hover:not(:disabled) { background: var(--surface-hover); }
+button.ghost { border-color: var(--border); color: var(--muted); background: transparent; }
+button:disabled { cursor: wait; opacity: .48; transform: none; }
+.scan-button { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding-inline: 16px; font-size: 13px; }
+.arrow { font-size: 18px; font-weight: 400; line-height: 1; }
+
+.preference { display: flex; align-items: center; gap: 8px; margin: 12px 2px 0; color: var(--muted); font-size: 13px; cursor: pointer; }
+input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.confirm { margin-top: 14px; border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: var(--surface); }
+.confirm strong { font-size: 13px; }
+.confirm p { margin: 5px 0 11px; color: var(--muted); font-size: 13px; }
+.confirm-buttons { margin-top: 4px; }
+.note { display: flex; gap: 6px; margin-top: 15px; color: var(--subtle); font-size: 13px; }
+.error { color: var(--error); }
+.success { color: var(--success); }
+[hidden] { display: none !important; }

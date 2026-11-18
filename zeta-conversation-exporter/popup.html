@@ -8,13 +8,48 @@
   </head>
   <body>
     <main>
-      <h1>Zeta 대화 내보내기</h1>
-      <p id="status">현재 열린 대화방에서 형식을 선택하세요.</p>
-      <div class="buttons">
-        <button id="json">JSON 저장</button>
-        <button id="markdown" class="secondary">Markdown 저장</button>
-      </div>
-      <p class="note">전체 기록을 읽는 동안 대화창이 자동으로 스크롤됩니다.</p>
+      <header class="header">
+        <div>
+          <p class="eyebrow">ZETA EXPORT</p>
+          <h1>대화 내보내기</h1>
+        </div>
+        <span class="format-badge">JSON + MD</span>
+      </header>
+
+      <section class="room-card">
+        <span class="room-dot" aria-hidden="true"></span>
+        <div>
+          <p class="room-label">현재 채팅방</p>
+          <p id="room-title" class="room-title">확인하는 중…</p>
+        </div>
+      </section>
+      <p id="cached-count" class="cached-count" hidden></p>
+
+      <section id="scan-panel">
+        <button id="scan" class="primary scan-button">
+          <span>이 채팅방 Export</span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </button>
+        <p id="status" class="status">전체 대화를 먼저 확인합니다.</p>
+      </section>
+
+      <section id="result-panel" hidden>
+        <div id="count" class="count"></div>
+        <label class="preference">
+          <input id="skip-confirm" type="checkbox">
+          다음부터 저장 전 확인 생략
+        </label>
+      </section>
+
+      <section id="confirm-panel" class="confirm" hidden>
+        <strong id="confirm-title">JSON과 Markdown을 저장할까요?</strong>
+        <p id="confirm-count"></p>
+        <div class="buttons confirm-buttons">
+          <button id="cancel" class="ghost">취소</button>
+          <button id="confirm" class="primary">두 파일 저장</button>
+        </div>
+      </section>
+
     </main>
     <script src="popup.js"></script>
   </body>
