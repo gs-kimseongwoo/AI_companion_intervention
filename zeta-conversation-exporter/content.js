@@ -37,6 +37,52 @@ function rowPosition(row) {
   return Number(row.dataset.index);
 }
 
+function summarizeTurnParts(parts) {
+  if (!parts.length) return null;
+
+  // Zeta can render a user-shaped, right-aligned bubble as part of an AI
+  // response. Classify the whole message row, not its first bubble: a real
+  // user row contains only user bubbles, while any character/narrator part
+  // makes the complete row an AI response.
+  const role = parts.some((part) => part.role === "character") ? "character" : "user";
+  const nonEmptyParts = parts.filter((part) => part.text);
+  const renderedParts = nonEmptyParts.length ? nonEmptyParts : parts;
+  const speakers = [...new Set(renderedParts.map((part) => part.speaker).filter(Boolean))];
+  const showSpeakerLabels = speakers.length > 1;
+  const emptyUserTurn = role === "user" && nonEmptyParts.length === 0;
+
+  return {
+    role,
+    speaker: speakers.join("/") || null,
+    // Keep a genuine empty user submission as a turn instead of dropping it.
+    text: emptyUserTurn ? null : renderedParts.map((part) => (
+      showSpeakerLabels ? `[${part.speaker}] ${part.text}` : part.text
+    )).join("\n")
+  };
+}
+
+function insertInferredEmptyUserTurns(orderedTurns) {
+  const output = [];
+
+  for (const turn of orderedTurns) {
+    const previous = output.at(-1);
+    if (previous?.role === "character" && turn.role === "character") {
+      // Zeta does not render a row for an Enter-only submission. Two distinct
+      // consecutive AI message rows are therefore the only DOM-visible trace
+      // of that empty user action.
+      output.push({
+        key: `inferred-empty-${previous.key}-${turn.key}`,
+        role: "user",
+        speaker: null,
+        text: null
+      });
+    }
+    output.push(turn);
+  }
+
+  return output;
+}
+
 function visibleTurns(log) {
   const output = [];
   const legacySelector = [
@@ -84,18 +130,12 @@ function visibleTurns(log) {
       });
     }
 
-    const validParts = parts.filter((part) => part.text);
-    if (!validParts.length) continue;
-    const speakers = [...new Set(validParts.map((part) => part.speaker).filter(Boolean))];
-    const showSpeakerLabels = speakers.length > 1;
+    const summary = summarizeTurnParts(parts);
+    if (!summary) continue;
     output.push({
       key,
       position: rowPosition(row),
-      role: validParts[0].role,
-      speaker: speakers.join("/") || null,
-      text: validParts.map((part) => (
-        showSpeakerLabels ? `[${part.speaker}] ${part.text}` : part.text
-      )).join("\n")
+      ...summary
     });
   }
   return output;
@@ -160,8 +200,11 @@ async function readAllTurns() {
       await sleep(SCROLL_PAUSE_MS);
     }
 
-    return [...seen.values()]
+    const orderedTurns = [...seen.values()]
       .sort((a, b) => a.position - b.position)
+      .map(({ position: _position, ...item }) => item);
+
+    return insertInferredEmptyUserTurns(orderedTurns)
       .map(({ position: _position, ...item }, turnIndex) => ({ turn: turnIndex + 1, ...item }));
   } finally {
     log.scrollTop = originalScrollTop;
@@ -194,7 +237,7 @@ function renderMarkdown(data) {
       "",
       turn.speaker ? `**화자:** ${turn.speaker}` : "",
       turn.speaker ? "" : null,
-      turn.text,
+      turn.text === null ? "*(빈 입력)*" : turn.text,
       ""
     );
   }
